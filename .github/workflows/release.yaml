@@ -26,6 +26,7 @@ jobs:
       MACOS_INTEL_STEM: BedLeveler5000-${{ github.ref_name }}-macos-x86_64
       MACOS_M1_STEM: BedLeveler5000-${{ github.ref_name }}-macos-m1
       HASHES_FILE: BedLeveler5000-${{ github.ref_name }}-SHA-256.txt
+      HAS_GPG_KEY: ${{ secrets.GPG_SIGNING_KEY != '' }}
       ASC_FILE: BedLeveler5000-${{ github.ref_name }}-SHA-256.txt.asc
     steps:
       - uses: actions/download-artifact@v7
@@ -49,6 +50,7 @@ jobs:
               > ${HASHES_FILE}
           cat ${HASHES_FILE}
       - name: Sign hashes file
+        if: ${{ env.HAS_GPG_KEY == 'true' }}
         env:
           GNUPGHOME: ~/.gnupg
           GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
@@ -65,9 +67,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # The signature is only attached when a GPG key is configured
+          SIGNATURE=""
+          if [ -f "${ASC_FILE}" ]; then SIGNATURE="${ASC_FILE}"; fi
           gh release create "$TAG" \
               --repo="$GITHUB_REPOSITORY" \
-              --title="${TAG}" \
+              --title="${TAG}-QS (community build)" \
               --prerelease \
               --verify-tag \
               --generate-notes \
@@ -76,4 +81,4 @@ jobs:
               ${MACOS_INTEL_STEM}.tgz \
               ${MACOS_M1_STEM}.tgz \
               ${HASHES_FILE} \
-              ${ASC_FILE}
+              ${SIGNATURE}
