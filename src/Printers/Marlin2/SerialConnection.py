@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 from Common.Common import LOG_ALL
+from Common.SerialPorts import describePort
+from Common.SerialPorts import shouldAssertDtr
 from PySide6 import QtCore
 from PySide6 import QtSerialPort
 import logging
@@ -21,6 +23,8 @@ class SerialConnection(QtCore.QObject):
         self._serialPort.errorOccurred.connect(self._handleSerialPortError)
 
         self.readBuffer = b''
+        self.linesReceived = 0
+        self._lastErrorMessage = None
 
         self._serialPort.setBaudRate(printerInfo.connection.baudRate)
         self._serialPort.setDataBits(printerInfo.connection.dataBits)
@@ -33,9 +37,9 @@ class SerialConnection(QtCore.QObject):
             case QtSerialPort.QSerialPort.SerialPortError.NoError:
                 return
             case QtSerialPort.QSerialPort.SerialPortError.DeviceNotFoundError:
-                message = 'An error occured while attempting to open a non-existing device.'
+                message = f'{self._serialPort.portName()} was not found. The printer may be unplugged or on a different port (try Ports -> Auto-detect printer).'
             case QtSerialPort.QSerialPort.SerialPortError.PermissionError:
-                message = 'An error occurred while attempting to open an already opened device by another process or a user not having enough permission and credentials to open.'
+                message = f'{self._serialPort.portName()} is in use by another program. Close PuTTY, Cura, OctoPrint, Pronterface or any other Bed Leveler 5000 window, then try again.'
             case QtSerialPort.QSerialPort.SerialPortError.OpenError:
                 message = 'An error occurred while attempting to open an already opened device in this object.'
             case QtSerialPort.QSerialPort.SerialPortError.NotOpenError:
@@ -45,7 +49,7 @@ class SerialConnection(QtCore.QObject):
             case QtSerialPort.QSerialPort.SerialPortError.ReadError:
                 message = 'An I/O error occurred while reading data.'
             case QtSerialPort.QSerialPort.SerialPortError.ResourceError:
-                message = 'An I/O error occurred when a resource becomes unavailable, e.g. when the device is unexpectedly removed from the system.'
+                message = f'Lost connection to {self._serialPort.portName()}. The printer may have been unplugged, powered off or reset.'
             case QtSerialPort.QSerialPort.SerialPortError.UnsupportedOperationError:
                 message = 'The requested device operation is not supported or prohibited by the running operating system.'
             case QtSerialPort.QSerialPort.SerialPortError.TimeoutError:
@@ -54,6 +58,13 @@ class SerialConnection(QtCore.QObject):
                 message = 'An unknown error occured.'
             case _:
                 message = 'An unidentified error occured.'
+
+        self._lastErrorMessage = message
+
+        # Errors raised while opening are reported by open() itself
+        if not self._serialPort.isOpen():
+            self.logger.error(f'Serial port error: {message}')
+            return
 
         self._error(f'Serial port error: {message}')
 
@@ -68,12 +79,24 @@ class SerialConnection(QtCore.QObject):
 
         self._serialPort.setPortName(portName)
 
+        self._lastErrorMessage = None
         if not self._serialPort.open(QtCore.QIODevice.ReadWrite):
-            self._error(f'Failed to open {portName}.')
+            self._error(self._lastErrorMessage or f'Failed to open {portName}.')
+
+        # Assert DTR so native-USB (CDC) boards send their replies. Without it,
+        # some Marlin boards accept commands but stay silent. Skipped for
+        # USB-serial bridge chips (CH340, FTDI, ...), where DTR resets the board.
+        self.logger.info(f'Port details: {describePort(portName)}')
+        if shouldAssertDtr(portName):
+            if not self._serialPort.setDataTerminalReady(True):
+                self.logger.warning(f'Failed to assert DTR on {portName}.')
+            else:
+                self.logger.info(f'Asserted DTR on {portName}')
 
         if clear and not self._serialPort.clear():
             self._error(f'Failed to clear {portName}.')
 
+        self.linesReceived = 0
         self.logger.info(f'Opened {self._serialPort.portName()}')
 
     def close(self):
@@ -112,6 +135,7 @@ class SerialConnection(QtCore.QObject):
             self.readBuffer = self.readBuffer[index+1:]
 
             self.logger.debug(f'Line: {line}')
+            self.linesReceived += 1
 
             self._processLine(line)
 

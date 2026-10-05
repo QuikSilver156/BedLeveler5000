@@ -262,6 +262,35 @@ class PrinterConnectWidget(QtWidgets.QWidget):
                 comboBox.setCurrentText(previous)
         self._updateWidgets()
 
+    def selectPrinter(self, displayName):
+        """ Selects a printer by display name. Returns True if found. """
+        if self._state != self.State.DISCONNECTED:
+            return False
+        for printerIndex in range(self.printerCount()):
+            if self.printerComboBox.itemData(printerIndex).printerInfo.displayName == displayName:
+                self.printerComboBox.setCurrentIndex(printerIndex)
+                return True
+        return False
+
+    def selectPort(self, portName):
+        """ Selects a serial port for the current Marlin printer. Returns True if available. """
+        if self._state != self.State.DISCONNECTED or self.printerCount() == 0:
+            return False
+        if self.connectionMode() != ConnectionMode.MARLIN_2:
+            return False
+
+        self.enumeratePorts()
+        comboBox = self.stackedWidget.currentWidget()
+        index = comboBox.findText(portName)
+        if index == -1:
+            return False
+        comboBox.setCurrentIndex(index)
+        self._updateWidgets()
+        return True
+
+    def currentPrinterName(self):
+        return None if self.printerCount() == 0 else self.printerInfo().displayName
+
     def printerInfo(self, index=None):
         index = self.printerComboBox.currentIndex() if index is None else index
         return self.printerComboBox.itemData(index).printerInfo

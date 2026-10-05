@@ -29,7 +29,7 @@ class ManualProbeButtonArea(QtWidgets.QMainWindow):
         for details in printerInfo.manualProbePoints:
             button = QtWidgets.QPushButton(details.name)
             point = QtCore.QPointF(details.x, details.y)
-            self.connections.append(button.clicked.connect(lambda name=details.name, x=point.x(), y=point.y(): self.probe.emit(NamedPoint2F(name, x, y))))
+            self.connections.append(button.clicked.connect(lambda _checked=False, name=details.name, x=point.x(), y=point.y(): self.probe.emit(NamedPoint2F(name, x, y))))
             layout.addWidget(button, details.row, details.column)
 
         widget = QtWidgets.QWidget()

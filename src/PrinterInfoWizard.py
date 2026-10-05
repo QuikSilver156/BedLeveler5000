@@ -24,6 +24,7 @@ from Widgets.PrinterConnectWidget import PrinterConnectWidget
 from Widgets.PrinterInfoWizard import WizardGrid
 from Widgets.PrinterInfoWizard.SerialWidget import SerialWidget
 from Common import Version
+from Common import PortScanner
 from PySide6 import QtCore
 from PySide6 import QtGui
 from PySide6 import QtWidgets
@@ -195,6 +196,10 @@ class PrinterInfoWizard(QtWidgets.QMainWindow):
         self.enumeratePortsAction.setStatusTip('Reenumerate COM ports')
         self.enumeratePortsAction.triggered.connect(self.enumeratePorts)
         self.portsMenu.addAction(self.enumeratePortsAction)
+        self.autoDetectAction = QtGui.QAction('Auto-detect printer', self)
+        self.autoDetectAction.setStatusTip('Find the port and baud rate the printer answers on')
+        self.autoDetectAction.triggered.connect(self.autoDetectPrinter)
+        self.portsMenu.addAction(self.autoDetectAction)
         self.menuBar().addMenu(self.portsMenu)
 
         self.helpMenu = QtWidgets.QMenu('Help', self)
@@ -220,6 +225,25 @@ class PrinterInfoWizard(QtWidgets.QMainWindow):
         for serialPortInfo in QtSerialPort.QSerialPortInfo.availablePorts():
             self.portComboBox.addItem(serialPortInfo.portName())
         self.portComboBox.setCurrentText(previous)
+
+    def autoDetectPrinter(self):
+        try:
+            currentBaudRate = int(self.marlin2ConnectionWidget.baudRate())
+        except (TypeError, ValueError):
+            currentBaudRate = None
+
+        result, busyPorts = PortScanner.scan(currentBaudRate, parent=self)
+        if result is not None:
+            self.enumeratePorts()
+            self.portComboBox.setCurrentText(result.port)
+            try:
+                self.marlin2ConnectionWidget.setBaudRate(PrinterInfo.BaudRate(result.baudRate))
+            except ValueError:
+                pass
+            message = PortScanner.describe(result, busyPorts) + '\n\nThe port and baud rate have been filled in.'
+        else:
+            message = PortScanner.describe(result, busyPorts)
+        QtWidgets.QMessageBox.information(self, 'Auto-detect printer', message)
 
     def saveAsFile(self):
         if len(self.displayNameLineEdit.text()) <= 0:

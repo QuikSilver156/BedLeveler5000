@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+from Common import Version
 from PySide6 import QtCore
 from PySide6 import QtGui
 from PySide6 import QtWidgets
@@ -22,15 +23,19 @@ class AboutDialog(QtWidgets.QDialog):
         titleLabel.setStyleSheet('QLabel { background-color: white; }')
 
         lineWidget = QtWidgets.QWidget()
-        lineWidget.setFixedHeight(0.15 * titleRect.height())
+        lineWidget.setFixedHeight(int(0.15 * titleRect.height()))
         lineWidget.setStyleSheet('QWidget { background-color: gray; }')
 
         descriptionText = f'{description}<br>' \
                           '<br><br>' \
-                          'By: <b>S&M Makers, LLC</b><br>' \
+                          'Original by: <b>S&M Makers, LLC</b><br>' \
                           f'<a href=\'{self.URL}\'>{self.URL}</a><br>' \
-                          f'Version: {qApp.applicationVersion()}<br>' \
-                          'Copyright: 2023<br>' \
+                          '<br>' \
+                          'Community build by <b>QuikSilver</b><br>' \
+                          'Built with <b>Claude AI</b> (Anthropic)<br>' \
+                          '<br>' \
+                          f'Version: {qApp.applicationVersion()} (based on {Version.COMMUNITY_BASE})<br>' \
+                          'Copyright: 2023 S&M Makers, LLC; modifications 2026 QuikSilver<br>' \
                           'License: GPLv3'
 
         descriptionLabel = QtWidgets.QLabel(descriptionText)
@@ -38,15 +43,15 @@ class AboutDialog(QtWidgets.QDialog):
         descriptionLabel.setStyleSheet('QLabel { background-color : white; }')
 
         textLayout = QtWidgets.QVBoxLayout()
-        textLayout.addSpacing(0.5 * titleRect.height())
+        textLayout.addSpacing(int(0.5 * titleRect.height()))
         textLayout.addWidget(titleLabel)
-        textLayout.addSpacing(0.5 * titleRect.height())
+        textLayout.addSpacing(int(0.5 * titleRect.height()))
         textLayout.addWidget(lineWidget)
-        textLayout.addSpacing(0.25 * titleRect.height())
+        textLayout.addSpacing(int(0.25 * titleRect.height()))
         textLayout.addWidget(descriptionLabel)
-        textLayout.setContentsMargins(0.1 * titleRect.width(),
+        textLayout.setContentsMargins(int(0.1 * titleRect.width()),
                                       0,
-                                      0.1 * titleRect.width(),
+                                      int(0.1 * titleRect.width()),
                                       0)
 
         textWidget = QtWidgets.QWidget()
