@@ -17,6 +17,8 @@ from Dialogs.WarningDialog import WarningDialog
 from Dialogs.ErrorDialog import ErrorDialog
 from Dialogs.FatalErrorDialog import FatalErrorDialog
 from Common import Version
+from Common import History
+from Common import PortScanner
 from PySide6 import QtCore
 from PySide6 import QtGui
 from PySide6 import QtWidgets
@@ -24,6 +26,8 @@ from PySide6 import QtSerialPort
 import argparse
 from enum import StrEnum
 import json
+import shutil
+import statistics
 import logging
 import pathlib
 import signal
@@ -43,17 +47,24 @@ class MainWindow(QtWidgets.QMainWindow):
         HOMING = 'Homing'
         MANUAL_PROBE = 'Manually probing point'
         UPDATING_MESH = 'Updating mesh'
+        LIVE_ADJUST = 'Live adjust'
+
+    NO_RESPONSE_TIMEOUT_MS = 10_000
+    SAMPLE_CHOICES = [1, 2, 3, 5]
 
     class Dialog(StrEnum):
         INITIALIZING = 'Initializing'
         HOMING = 'Homing'
         PROBE = 'Probe'
+        LIVE = 'Live'
 
     def __init__(self, *args, printersDir, printer=None, host=None, port=None, noTemperatureReporting=False, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.setWindowTitle(QtCore.QCoreApplication.applicationName())
+        self.setWindowTitle(f'{QtCore.QCoreApplication.applicationName()} {QtCore.QCoreApplication.applicationVersion()}')
         self.logger = logging.getLogger(QtCore.QCoreApplication.applicationName())
+        self.settings = QtCore.QSettings('QuikSilver', 'BedLeveler5000')
+        self.liveContext = None
 
         self.__createWidgets()
         self.__layoutWidgets()
@@ -69,6 +80,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.printerQtConnections = []
         self.noTemperatureReporting = noTemperatureReporting
         self.printerConnectWidget.loadPrinters(printersDir, desiredPrinter=printer, desiredHost=host, desiredPort=port)
+        if printer is None:
+            self._restoreLastConnection()
         self.updateState(self.State.DISCONNECTED)
 
     def __createWidgets(self):
@@ -87,6 +100,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Manual widget
         self.manualWidget = ManualWidget()
         self.manualWidget.probe.connect(self.manualProbe)
+        self.manualWidget.liveAdjust.connect(self.startLiveAdjust)
 
         # Mesh widget
         self.meshWidget = MeshWidget()
@@ -110,6 +124,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def __createMenus(self):
         # File menu
         self.fileMenu = QtWidgets.QMenu('File', self)
+        self.exportHistoryAction = QtGui.QAction('Export probe history (CSV)...', self)
+        self.exportHistoryAction.setStatusTip('Save every "Probe all" run to a CSV file')
+        self.exportHistoryAction.triggered.connect(self.exportHistory)
+        self.fileMenu.addAction(self.exportHistoryAction)
+        self.openHistoryFolderAction = QtGui.QAction('Open history folder', self)
+        self.openHistoryFolderAction.triggered.connect(
+            lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(History.historyDir()))))
+        self.fileMenu.addAction(self.openHistoryFolderAction)
+        self.fileMenu.addSeparator()
         self.exitAction = QtGui.QAction('Exit', self)
         self.exitAction.setStatusTip('Exit the application')
         self.exitAction.triggered.connect(self.close)
@@ -122,9 +145,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.enumeratePortsAction.setStatusTip('Reenumerate COM ports')
         self.enumeratePortsAction.triggered.connect(self.printerConnectWidget.enumeratePorts)
         self.portsMenu.addAction(self.enumeratePortsAction)
+        self.autoDetectAction = QtGui.QAction('Auto-detect printer', self)
+        self.autoDetectAction.setStatusTip('Ask each COM port for M115 and select the one the printer answers on')
+        self.autoDetectAction.triggered.connect(self.autoDetectPrinter)
+        self.portsMenu.addAction(self.autoDetectAction)
         self.menuBar().addMenu(self.portsMenu)
 
         self.settingsMenu = QtWidgets.QMenu('Settings', self)
+        self.samplesMenu = self.settingsMenu.addMenu('Samples per point')
+        self.samplesActionGroup = QtGui.QActionGroup(self)
+        self.samplesActionGroup.setExclusive(True)
+        currentSamples = self.samplesPerPoint()
+        for count in self.SAMPLE_CHOICES:
+            action = QtGui.QAction(f'{count}' + (' (no averaging)' if count == 1 else ' (average)'), self)
+            action.setCheckable(True)
+            action.setChecked(count == currentSamples)
+            action.setData(count)
+            action.triggered.connect(lambda checked=False, count=count: self.settings.setValue('samplesPerPoint', count))
+            self.samplesActionGroup.addAction(action)
+            self.samplesMenu.addAction(action)
         self.menuBar().addMenu(self.settingsMenu)
 
         self.helpMenu = QtWidgets.QMenu('Help', self)
@@ -148,11 +187,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dialogs[self.Dialog.HOMING].rejected.connect(self._cancel)
         self.dialogs[self.Dialog.PROBE].rejected.connect(self._cancel)
 
+        self.dialogs[self.Dialog.LIVE] = CancellableStatusDialog(text='Live adjust', parent=self)
+        self.dialogs[self.Dialog.LIVE].setStandardButtons(QtWidgets.QMessageBox.Cancel)
+        self.dialogs[self.Dialog.LIVE].button(QtWidgets.QMessageBox.Cancel).setText('Done')
+        self.dialogs[self.Dialog.LIVE].rejected.connect(self._cancel)
+
     def __createTimers(self):
         self.temperatureJobPending = False
         self.temperatureTimer = QtCore.QTimer()
         self.temperatureTimer.setInterval(1000) # TODO: Make the interval configurable
         self.temperatureTimer.timeout.connect(self.getTemperatures)
+
+        self.noResponseTimer = QtCore.QTimer()
+        self.noResponseTimer.setSingleShot(True)
+        self.noResponseTimer.setInterval(self.NO_RESPONSE_TIMEOUT_MS)
+        self.noResponseTimer.timeout.connect(self._checkPrinterResponding)
 
     def _createId(self, base):
         self.currentId += 1
@@ -173,6 +222,7 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError('Invalid connection mode')
 
         # Make connections
+        self.printerQtConnections = []
         self.printerQtConnections.append(self.printer.errorOccurred.connect(self.reportPrinterError))
         self.printerQtConnections.append(self.printer.inited.connect(self._processInitResults))
         self.printerQtConnections.append(self.printer.homed.connect(self._finishHoming))
@@ -181,7 +231,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.printerQtConnections.append(self.printer.probed.connect(self._processProbe))
 
         # Open the printer
-        self.printer.open(**kwargs)
+        try:
+            self.printer.open(**kwargs)
+        except IOError as exception:
+            for qtConnection in self.printerQtConnections:
+                self.printer.disconnect(qtConnection)
+            self.printerQtConnections = []
+            self.printer = None
+            self.updateState(self.State.DISCONNECTED)
+            self.logger.error(str(exception))
+            ErrorDialog(self, str(exception))
+            return
         self.printerConnectWidget.setConnected()
         self.meshCoordinates = None
 
@@ -198,12 +258,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.printer.init(self._createId('init'))
         self.dialogs[self.Dialog.INITIALIZING].show()
 
+        # Watch for a printer that never answers (wrong port, wrong baud, ...)
+        if self.printerConnectWidget.connectionMode() == ConnectionMode.MARLIN_2:
+            self.noResponseTimer.start()
+
     def disconnectFromPrinter(self):
         assert(self.printerInfo == self.printerConnectWidget.printerInfo())
 
-        # Stop the temperature timer
+        # Stop the timers
         self.temperatureJobPending = False
         self.temperatureTimer.stop()
+        self.noResponseTimer.stop()
+        self.liveContext = None
+
+        if self.printer is None:
+            self.updateState(self.State.DISCONNECTED)
+            return
 
         # Close the printer
         self.printerConnectWidget.setDisconnected()
@@ -243,6 +313,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.printerConnectWidget.setConnected()
 
         self.enumeratePortsAction.setEnabled(not connected)
+        self.autoDetectAction.setEnabled(not connected)
 
         self.temperatureControlsWidget.setEnabled(connected and not busy)
         self.manualWidget.setEnabled(connected and not busy)
@@ -295,6 +366,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                    result.columnCount)
         self.updateState(self.State.CONNECTED)
         self.dialogs[self.Dialog.INITIALIZING].accept()
+        self._saveLastConnection()
 
     def home(self):
         self.printer.home(self._createId('home'))
@@ -312,8 +384,11 @@ class MainWindow(QtWidgets.QMainWindow):
         assert(len(pointList) > 0)
         context={'type': self.State.MANUAL_PROBE,
                  'command': command,
-                 'pointList': pointList,
-                 'resultList': []}
+                 'pointList': list(pointList),
+                 'resultList': [],
+                 'samples': self.samplesPerPoint(),
+                 'currentSamples': [],
+                 'spreads': {}}
 
         point = pointList[0]
         self.printer.probe(self._createId(f'probe_{point.x}_{point.y}'), context=context, x=point.x, y=point.y)
@@ -341,12 +416,27 @@ class MainWindow(QtWidgets.QMainWindow):
         assert isinstance(context, dict), 'context must be a dict.'
         if'type' not in context:
             self._error('Detected a printer response mismatch.')
+        elif context['type'] == self.State.LIVE_ADJUST:
+            self._processLiveProbe(context, response)
         elif context['type'] == self.State.MANUAL_PROBE:
             assert(self.state == self.State.MANUAL_PROBE)
 
+            # Collect samples for the current point
+            point = context['pointList'][0]
+            context['currentSamples'].append(response.z)
+            sampleCount = len(context['currentSamples'])
+            if sampleCount < context['samples']:
+                self.printer.probe(self._createId(f'probe_{point.x}_{point.y}'), context=context, x=point.x, y=point.y)
+                self.dialogs[self.Dialog.PROBE].setText(f'Manually probing at ({point.x}, {point.y}) '
+                                                        f'- sample {sampleCount + 1} of {context["samples"]}')
+                return
+
             # Move the current point from the point list to the result list
-            point = context['pointList'].pop(0)
-            context['resultList'].append(NamedPoint3F(point.name, response.x, response.y, response.z))
+            samples = context['currentSamples']
+            context['currentSamples'] = []
+            context['spreads'][point.name] = max(samples) - min(samples)
+            context['pointList'].pop(0)
+            context['resultList'].append(NamedPoint3F(point.name, response.x, response.y, statistics.fmean(samples)))
 
             if len(context['pointList']) > 0:
                 point = context['pointList'][0]
@@ -354,6 +444,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.dialogs[self.Dialog.PROBE].setText(f'Manually probing at ({point.x}, {point.y})')
             else:
                 self.manualWidget.reportProbe(context['command'], context['resultList'])
+                self._reportSamples(context)
+                if context['command'] == ManualWidget.Command.ALL:
+                    self._recordHistory(context)
                 self.dialogs[self.Dialog.PROBE].accept()
                 self.updateState(self.State.CONNECTED)
         else:
@@ -382,6 +475,131 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self.updateMesh(row, column)
 
+    # ----- Live adjust -----
+    def startLiveAdjust(self, point, referenceName, referenceZ):
+        self.liveContext = {'type': self.State.LIVE_ADJUST,
+                            'point': point,
+                            'referenceName': referenceName,
+                            'referenceZ': referenceZ,
+                            'count': 0,
+                            'lastText': None}
+        self.updateState(self.State.LIVE_ADJUST)
+        self.dialogs[self.Dialog.LIVE].setText(f'Live adjust: point {point.name}\n\nTaking the first reading...')
+        self.dialogs[self.Dialog.LIVE].show()
+        self._liveProbe()
+
+    def _liveProbe(self):
+        point = self.liveContext['point']
+        self.printer.probe(self._createId(f'live_{point.x}_{point.y}'), context=self.liveContext, x=point.x, y=point.y)
+
+    def _processLiveProbe(self, context, response):
+        if self.state != self.State.LIVE_ADJUST or context is not self.liveContext:
+            return # Stale result after Done was pressed
+
+        context['count'] += 1
+        point = context['point']
+        text = self.manualWidget.liveReadingText(point.name, response.z, context['referenceName'], context['referenceZ'])
+        context['lastText'] = text
+        self.dialogs[self.Dialog.LIVE].setText(f'Live adjust: point {point.name} (reading {context["count"]})\n\n'
+                                               f'{text}\n\n'
+                                               f'Turn the knob for point {point.name} now. The next reading starts '
+                                               f'automatically. Press Done when it reads close to +0.000.')
+        self._liveProbe()
+
+    # ----- Sampling, history -----
+    def samplesPerPoint(self):
+        try:
+            value = int(self.settings.value('samplesPerPoint', 1))
+        except (TypeError, ValueError):
+            value = 1
+        return value if value in self.SAMPLE_CHOICES else 1
+
+    def _reportSamples(self, context):
+        if context['samples'] <= 1 or not context['spreads']:
+            return
+        worstName = max(context['spreads'], key=context['spreads'].get)
+        worst = context['spreads'][worstName]
+        note = f'Averaged {context["samples"]} samples per point. Largest spread: {worst:.3f} mm (point {worstName}).'
+        if worst > 0.03:
+            note += ' That is a lot of scatter; check the probe and that the nozzle is clean.'
+        self.manualWidget.appendNote(note)
+
+    def _recordHistory(self, context):
+        printerName = self.printerInfo.displayName
+        try:
+            previous = History.lastRun(printerName)
+            History.appendRun(printerName, context['resultList'], context['samples'], context['spreads'])
+        except (OSError, ValueError) as exception:
+            self.logger.warning(f'Failed to update probe history: {exception}')
+            return
+
+        if previous is None:
+            return
+        timestamp, values = previous
+        changes = []
+        for point in context['resultList']:
+            if point.name in values:
+                changes.append(f'{point.name} {point.z - values[point.name]:+.3f}')
+        if changes:
+            when = timestamp.replace('T', ' ')
+            self.manualWidget.appendNote(f'Change since last run ({when}): ' + ', '.join(changes))
+
+    def exportHistory(self):
+        source = History.historyFile()
+        if not source.exists():
+            self._warning('No probe history yet. Run "Probe all" at least once.')
+            return
+        filePath = QtWidgets.QFileDialog.getSaveFileName(self, 'Export probe history', 'probe_history.csv',
+                                                         'CSV files (*.csv)')[0]
+        if filePath:
+            try:
+                shutil.copyfile(source, filePath)
+            except OSError as exception:
+                self._warning(f'Failed to export history: {exception}')
+
+    # ----- Connection helpers -----
+    def autoDetectPrinter(self):
+        if self.printer is not None or self.printerConnectWidget.printerCount() == 0:
+            return
+        if self.printerConnectWidget.connectionMode() != ConnectionMode.MARLIN_2:
+            self._warning('Auto-detect only works with USB (Marlin) printers.')
+            return
+
+        profileBaudRate = int(self.printerInfo.connection.baudRate)
+        result, busyPorts = PortScanner.scan(profileBaudRate, parent=self)
+        if result is not None:
+            self.printerConnectWidget.selectPort(result.port)
+        QtWidgets.QMessageBox.information(self, 'Auto-detect printer',
+                                          PortScanner.describe(result, busyPorts, profileBaudRate))
+
+    def _checkPrinterResponding(self):
+        if self.printer is None or not isinstance(self.printer, Marlin2Printer):
+            return
+        if self.printer.commandConnection.linesReceived > 0:
+            return
+
+        port = self.printerConnectWidget.port()
+        self._error(f'The printer has not responded on {port} after {self.NO_RESPONSE_TIMEOUT_MS // 1000} seconds.\n\n'
+                    'Things to check:\n'
+                    '- The right port is selected (try Ports -> Auto-detect printer)\n'
+                    '- The profile\'s baud rate matches the printer firmware (usually 115200 or 250000)\n'
+                    '- The printer is powered on and has finished starting up\n'
+                    '- No other program (PuTTY, Cura, OctoPrint) is connected to the printer')
+
+    def _saveLastConnection(self):
+        self.settings.setValue('lastPrinter', self.printerInfo.displayName)
+        if self.printerConnectWidget.connectionMode() == ConnectionMode.MARLIN_2:
+            self.settings.setValue('lastPort', self.printerConnectWidget.port())
+
+    def _restoreLastConnection(self):
+        lastPrinter = self.settings.value('lastPrinter')
+        if lastPrinter and self.printerConnectWidget.selectPrinter(str(lastPrinter)):
+            if self.printerInfo is None or self.printerInfo != self.printerConnectWidget.printerInfo():
+                self.switchPrinter()
+            lastPort = self.settings.value('lastPort')
+            if lastPort:
+                self.printerConnectWidget.selectPort(str(lastPort))
+
     def setBedTemperature(self, state, temp):
         self.printer.setBedTemperature(self._createId('setBedTemperature'), temperature=temp if state else 0)
 
@@ -396,7 +614,12 @@ class MainWindow(QtWidgets.QMainWindow):
             dialog.reject()
             dialog.blockSignals(False)
 
-        self.printer.abort()
+        if self.state == self.State.LIVE_ADJUST and self.liveContext is not None and self.liveContext.get('lastText'):
+            self.manualWidget.logLiveReading(self.liveContext['lastText'])
+        self.liveContext = None
+
+        if self.printer is not None:
+            self.printer.abort()
         self.updateState(self.State.CONNECTED)
 
     def reportPrinterError(self, type_, id_, context, message):

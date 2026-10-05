@@ -11,6 +11,7 @@ import math
 
 class ManualWidget(QtWidgets.QWidget):
     probe = QtCore.Signal(str, list)
+    liveAdjust = QtCore.Signal(object, str, float) # point, reference name, reference z
 
     class Command(enum.StrEnum):
         SINGLE = 'Single'
@@ -35,6 +36,8 @@ class ManualWidget(QtWidgets.QWidget):
         super().__init__(*args, **kwargs)
 
         self.fixedMap = None
+        self.lastResults = None
+        self.lastReferenceName = None
 
         self.__createWidgets()
         self.__layoutWidgets()
@@ -71,6 +74,11 @@ class ManualWidget(QtWidgets.QWidget):
         self.probeAllButton = QtWidgets.QPushButton('Probe all')
         self.probeAllButton.clicked.connect(self._probeAll)
 
+        # Live adjust button
+        self.liveAdjustButton = QtWidgets.QPushButton('Live adjust')
+        self.liveAdjustButton.setToolTip('Probe one point over and over while you turn its knob')
+        self.liveAdjustButton.clicked.connect(self._startLiveAdjust)
+
         # Clear button
         self.clearButton = QtWidgets.QPushButton('Clear')
         self.clearButton.clicked.connect(self.clear)
@@ -79,6 +87,7 @@ class ManualWidget(QtWidgets.QWidget):
         buttonLayout = QtWidgets.QHBoxLayout()
         buttonLayout.addStretch()
         buttonLayout.addWidget(self.probeAllButton)
+        buttonLayout.addWidget(self.liveAdjustButton)
         buttonLayout.addWidget(self.clearButton)
         buttonLayout.addStretch()
 
@@ -105,6 +114,8 @@ class ManualWidget(QtWidgets.QWidget):
         self.printerInfo = printerInfo
         self.manualProbeButtonArea.configure(printerInfo)
         self.fixedMap = {}
+        self.lastResults = None
+        self.lastReferenceName = None
 
         # Set reference combo box items
         defaultReference = None
@@ -167,42 +178,127 @@ class ManualWidget(QtWidgets.QWidget):
                 suffix = ' (Fixed reference)'
             elif self.fixedMap[raw.name]:
                 suffix = ''
-            elif self.outputComboBox.currentData() == self.Output.DELTA:
-                suffix = f' (Delta: {relative.z:6.3f})'
             else:
-                turns = relative.z / self.printerInfo.screwType.pitch
-                positiveTurns = turns > 0
-                turns = abs(turns)
-
-                if self.outputComboBox.currentData() == self.Output.TURNS:
-                    amount = round(turns, 3)
-                    value = f'{amount:5.3f}'
-                    units = ' turns'
-                elif self.outputComboBox.currentData() == self.Output.DEGREES:
-                    amount = round(360.0 * turns, 2)
-                    value = f'{amount:6.2f}'
-                    units = '\u00B0'
-                elif self.outputComboBox.currentData() == self.Output.RADIANS:
-                    amount = round(2*math.pi * turns, 4)
-                    value = f'{amount:7.4f}'
-                    units = f' rad'
-                else:
-                    hours = math.trunc(turns)
-                    minutes = round(60 * (turns - hours))
-                    amount = hours + minutes
-                    value = f'{hours:02.0f}:{minutes:02.0f}'
-                    units = ''
-
-                if amount == 0:
-                    sign = ''
-                elif self.printerInfo.screwType.clockwise:
-                    sign = ' CCW' if positiveTurns else ' CW'
-                else:
-                    sign = ' CW' if positiveTurns else ' CCW'
-                suffix = f' (Adjust: {value}{units}{sign})'
+                suffix = self.adjustText(relative.z)
 
             self.log.append(prefix + suffix)
         self.previousCommand = self.Command.ALL
+
+        # Remember this run for live adjust
+        self.lastResults = {p.name: p.z for p in resultList}
+        self.lastReferenceName = referenceName
+
+        # Warn when the corners agree but the middle does not (a bowed bed)
+        bowNote = self.bowWarning(resultList)
+        if bowNote:
+            self.appendNote(bowNote)
+
+    def adjustText(self, relativeZ):
+        """ Returns the ' (Adjust: ...)' / ' (Delta: ...)' text for a height difference. """
+        output = self.outputComboBox.currentData()
+
+        if output == self.Output.NONE:
+            return ''
+        if output == self.Output.DELTA:
+            return f' (Delta: {relativeZ:6.3f})'
+
+        turns = relativeZ / self.printerInfo.screwType.pitch
+        positiveTurns = turns > 0
+        turns = abs(turns)
+
+        if output == self.Output.TURNS:
+            amount = round(turns, 3)
+            value = f'{amount:5.3f}'
+            units = ' turns'
+        elif output == self.Output.DEGREES:
+            amount = round(360.0 * turns, 2)
+            value = f'{amount:6.2f}'
+            units = '\u00B0'
+        elif output == self.Output.RADIANS:
+            amount = round(2*math.pi * turns, 4)
+            value = f'{amount:7.4f}'
+            units = f' rad'
+        else:
+            hours = math.trunc(turns)
+            minutes = round(60 * (turns - hours))
+            amount = hours + minutes
+            value = f'{hours:02.0f}:{minutes:02.0f}'
+            units = ''
+
+        if amount == 0:
+            sign = ''
+        elif self.printerInfo.screwType.clockwise:
+            sign = ' CCW' if positiveTurns else ' CW'
+        else:
+            sign = ' CW' if positiveTurns else ' CCW'
+        return f' (Adjust: {value}{units}{sign})'
+
+    def appendNote(self, text):
+        self.log.append(f'Note: {text}')
+
+    @staticmethod
+    def bowWarning(resultList, cornerTolerance=0.05, bowThreshold=0.08):
+        """ Detects a bowed bed: outer points level with each other, middle point not. """
+        if len(resultList) < 4:
+            return None
+
+        centerX = sum(p.x for p in resultList) / len(resultList)
+        centerY = sum(p.y for p in resultList) / len(resultList)
+        distance = lambda p: math.hypot(p.x - centerX, p.y - centerY)
+
+        middle = min(resultList, key=distance)
+        others = [p for p in resultList if p is not middle]
+        nearestOther = min(distance(p) for p in others)
+        if nearestOther <= 0 or distance(middle) > 0.5 * nearestOther:
+            return None
+
+        otherZ = [p.z for p in others]
+        otherRange = max(otherZ) - min(otherZ)
+        difference = middle.z - sum(otherZ) / len(otherZ)
+
+        if otherRange > cornerTolerance or abs(difference) < bowThreshold:
+            return None
+
+        shape = 'higher than the edges (bed is domed)' if difference > 0 else 'lower than the edges (bed dips in the middle)'
+        return (f'The outer points agree within {otherRange:.3f} mm, but {middle.name} is '
+                f'{abs(difference):.3f} mm {shape}. Turning the knobs can\'t fix a bow; '
+                f'leave them and let mesh bed leveling (G29) compensate.')
+
+    def _startLiveAdjust(self):
+        if not self.lastResults or self.lastReferenceName is None:
+            QtWidgets.QMessageBox.information(self, 'Live adjust',
+                                              'Run "Probe all" first so there is a reference height to adjust toward.')
+            return
+
+        candidates = [p for p in self.printerInfo.manualProbePoints
+                      if p.name != self.lastReferenceName and not self.fixedMap.get(p.name, False)]
+        if not candidates:
+            QtWidgets.QMessageBox.information(self, 'Live adjust', 'There are no adjustable points.')
+            return
+
+        # Default to the point that is furthest off
+        candidates.sort(key=lambda p: -abs(self.lastResults.get(p.name, 0.0) - self.lastResults[self.lastReferenceName]))
+        names = [p.name for p in candidates]
+        name, ok = QtWidgets.QInputDialog.getItem(self, 'Live adjust',
+                                                  f'Point to adjust (reference: {self.lastReferenceName}):',
+                                                  names, 0, False)
+        if not ok:
+            return
+
+        point = next(p for p in candidates if p.name == name)
+        self.liveAdjust.emit(NamedPoint2F(point.name, point.x, point.y),
+                             self.lastReferenceName,
+                             float(self.lastResults[self.lastReferenceName]))
+
+    def liveReadingText(self, name, z, referenceName, referenceZ):
+        relative = z - referenceZ
+        return f'{name}: {z:6.3f} mm, {relative:+.3f} vs {referenceName}{self.adjustText(relative)}'
+
+    def logLiveReading(self, text):
+        if self.previousCommand is not None:
+            self.log.append('--------------------------------------------------')
+        self.log.append(f'Live adjust final reading - {text}')
+        self.previousCommand = self.Command.SINGLE
 
     @classmethod
     def _relativeDistances(self, probeList, referenceName, direction, clockwiseScrew):
