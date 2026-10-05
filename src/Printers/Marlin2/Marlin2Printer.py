@@ -152,14 +152,20 @@ class Marlin2Machine(QtCore.QObject):
         self._transition = transition
 
     def abort(self):
+        # Only stop listening for this machine's reply. The printer is still
+        # executing the command, so CommandConnection must still see it finish
+        # (and delete it); otherwise its queue stays blocked and every later
+        # command waits forever.
         if self.command is not None:
-            self.command.finished.disconnect()
-            self.command.errorOccurred.disconnect()
-            self.command.deleteLater()
+            try:
+                self.command.finished.disconnect(self.processReply)
+            except (RuntimeError, TypeError):
+                pass
             self.command = None
 
     def processReply(self, command):
-        assert(command == self.command)
+        if self.command is None or command != self.command:
+            return # Reply to a command this machine has aborted
 
         error = self.command.error
         self.command.deleteLater()
