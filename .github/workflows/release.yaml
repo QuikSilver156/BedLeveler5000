@@ -73,7 +73,6 @@ jobs:
           gh release create "$TAG" \
               --repo="$GITHUB_REPOSITORY" \
               --title="${TAG}-QS (community build)" \
-              --prerelease \
               --verify-tag \
               --generate-notes \
               ${WINDOWS_STEM}.7z \
