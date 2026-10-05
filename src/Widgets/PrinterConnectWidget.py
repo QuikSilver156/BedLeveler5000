@@ -35,6 +35,7 @@ class PrinterConnectWidget(QtWidgets.QWidget):
         super().__init__(*args, **kwargs)
 
         self.hasHomeButton = hasHomeButton
+        self.octoPrintMode = False
 
         self.__createWidgets(hasHomeButton)
         self.__layoutWidgets()
@@ -248,7 +249,24 @@ class PrinterConnectWidget(QtWidgets.QWidget):
            previousSelectedSpecific != self._currentSpecific():
             self.printerChanged.emit(self.printerComboBox.currentData().printerInfo)
 
+    OCTOPRINT_PORT = 'OctoPrint'
+
+    def setOctoPrintMode(self, enabled):
+        """ When enabled, USB (Marlin) printers connect through OctoPrint instead of a COM port. """
+        self.octoPrintMode = bool(enabled)
+        if self.printerCount() > 0:
+            self.enumeratePorts()
+
     def enumeratePorts(self):
+        if self.octoPrintMode:
+            for printerIndex in range(self.printerComboBox.count()):
+                if self.connectionMode(printerIndex) == ConnectionMode.MARLIN_2:
+                    comboBox = self.stackedWidget.widget(printerIndex)
+                    comboBox.clear()
+                    comboBox.addItem(self.OCTOPRINT_PORT)
+            self._updateWidgets()
+            return
+
         serialPortInfoList = QtSerialPort.QSerialPortInfo.availablePorts()
 
         for printerIndex in range(self.printerComboBox.count()):

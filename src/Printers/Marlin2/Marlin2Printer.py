@@ -20,11 +20,17 @@ class Marlin2Printer(CommandPrinter):
     DEFAULT_PROBE_XY_SPEED = 5000
     DEFAULT_PROBE_Z_HEIGHT = 10
 
-    def __init__(self, printerInfo, port=None, *args,  **kwargs):
+    def __init__(self, printerInfo, port=None, *args, octoPrintSettings=None, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.port = port
-        self.commandConnection = CommandConnection(printerInfo=printerInfo)
+        if octoPrintSettings is not None:
+            from .OctoPrintConnection import OctoPrintCommandConnection
+            self.commandConnection = OctoPrintCommandConnection(printerInfo=printerInfo, octoPrintSettings=octoPrintSettings)
+            self.commandConnection.connectionError.connect(
+                lambda message: self.errorOccurred.emit(CommandType.INIT, '', None, message))
+        else:
+            self.commandConnection = CommandConnection(printerInfo=printerInfo)
 
         self.machineSet = set()
 
