@@ -10,6 +10,8 @@ from Printers.Marlin2.Marlin2Printer import Marlin2Printer
 from Printers.Moonraker.MoonrakerPrinter import MoonrakerPrinter
 from Widgets.BedLeveler5000.TemperatureControlsWidget import TemperatureControlsWidget
 from Widgets.BedLeveler5000.StatusBar import StatusBar
+from Widgets.BedLeveler5000.WebcamWidget import WebcamWidget
+from Widgets.BedLeveler5000.TemperatureGraphWidget import TemperatureGraphWidget
 from Widgets.PrinterConnectWidget import PrinterConnectWidget
 from Dialogs.BedLeveler5000.CancellableStatusDialog import CancellableStatusDialog
 from Dialogs.AboutDialog import AboutDialog
@@ -74,6 +76,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f'{QtCore.QCoreApplication.applicationName()} {QtCore.QCoreApplication.applicationVersion()}')
         self.logger = logging.getLogger(QtCore.QCoreApplication.applicationName())
         self.settings = QtCore.QSettings('QuikSilver', 'BedLeveler5000')
+        self.closingWindow = False
         self.liveContext = None
         self.soakContext = None
         self.safetyContext = None
@@ -142,6 +145,32 @@ class MainWindow(QtWidgets.QMainWindow):
         widget.setLayout(layout)
         self.setCentralWidget(widget)
 
+        # Temperature graph panel
+        self.temperatureGraph = TemperatureGraphWidget()
+        self.temperatureDock = QtWidgets.QDockWidget('Temperature', self)
+        self.temperatureDock.setObjectName('temperatureDock')
+        self.temperatureDock.setWidget(self.temperatureGraph)
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.temperatureDock)
+        self.temperatureDock.setVisible(self.settings.value('temperatureGraph/visible', False) in (True, 'true', '1', 1))
+        self.temperatureDock.visibilityChanged.connect(
+            lambda visible: self.settings.setValue('temperatureGraph/visible', self.temperatureDock.isVisible())
+                            if self.isVisible() and not self.closingWindow else None)
+
+        # Webcam panel (OctoPrint cameras), dockable on the right
+        self.webcamWidget = WebcamWidget(self.settings)
+        self.webcamDock = QtWidgets.QDockWidget('Webcam', self)
+        self.webcamDock.setObjectName('webcamDock')
+        self.webcamDock.setWidget(self.webcamWidget)
+        self.webcamDock.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea |
+                                        QtCore.Qt.BottomDockWidgetArea)
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.webcamDock)
+        self.splitDockWidget(self.webcamDock, self.temperatureDock, QtCore.Qt.Vertical)
+        self.webcamDock.setVisible(self.settings.value('webcam/visible', False) in (True, 'true', '1', 1))
+        # Remember whether the panel is open, but not when it hides because the window is closing
+        self.webcamDock.visibilityChanged.connect(
+            lambda visible: self.settings.setValue('webcam/visible', self.webcamDock.isVisible())
+                            if self.isVisible() and not self.closingWindow else None)
+
     def __createMenus(self):
         # File menu
         self.fileMenu = QtWidgets.QMenu('File', self)
@@ -181,6 +210,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.octoPrintSettingsAction.triggered.connect(self.editOctoPrintSettings)
         self.portsMenu.addAction(self.octoPrintSettingsAction)
         self.menuBar().addMenu(self.portsMenu)
+
+        self.viewMenu = QtWidgets.QMenu('View', self)
+        self.webcamAction = self.webcamDock.toggleViewAction()
+        self.webcamAction.setText('Webcam')
+        self.webcamAction.setStatusTip('Show OctoPrint\'s webcams')
+        self.viewMenu.addAction(self.webcamAction)
+        self.temperatureGraphAction = self.temperatureDock.toggleViewAction()
+        self.temperatureGraphAction.setText('Temperature graph')
+        self.temperatureGraphAction.setStatusTip('Show bed and nozzle temperatures over time')
+        self.viewMenu.addAction(self.temperatureGraphAction)
+        self.menuBar().addMenu(self.viewMenu)
 
         self.settingsMenu = QtWidgets.QMenu('Settings', self)
         self.samplesMenu = self.settingsMenu.addMenu('Samples per point')
@@ -315,6 +355,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.temperatureControlsWidget.resetButtons()
 
         # Start the temperature timer
+        self.temperatureGraph.clear()
         self.temperatureJobPending = False
         if not self.noTemperatureReporting:
             self.temperatureTimer.start()
@@ -413,6 +454,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def updateTemperatures(self, id_, context, result):
         self.temperatureJobPending = False
+        self.temperatureGraph.addReading(result.bedActual, result.bedDesired, result.toolActual, result.toolDesired)
         self._trackBedTemperature(result)
         self.statusBar().setBedTemp(actual=result.bedActual, desired=result.bedDesired, power=result.bedPower)
         self.statusBar().setNozzleTemp(actual=result.toolActual, desired=result.toolDesired, power=result.toolPower)
@@ -695,6 +737,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.disconnectFromPrinter()
 
     def closeEvent(self, event):
+        self.closingWindow = True
+        self._closeEvent(event)
+        if not event.isAccepted():
+            self.closingWindow = False
+
+    def _closeEvent(self, event):
         if self.printer is not None and self.printer.connected():
             if self.state not in (self.State.CONNECTED, self.State.DISCONNECTED):
                 answer = QtWidgets.QMessageBox.question(
@@ -825,7 +873,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.updateState()
 
     def editOctoPrintSettings(self):
-        return OctoPrintSettingsDialog(self.settings, self).exec() == QtWidgets.QDialog.Accepted
+        accepted = OctoPrintSettingsDialog(self.settings, self).exec() == QtWidgets.QDialog.Accepted
+        if accepted and self.webcamDock.isVisible():
+            self.webcamWidget.reload()
+        return accepted
 
     # ----- Sampling, history -----
     def samplesPerPoint(self):
