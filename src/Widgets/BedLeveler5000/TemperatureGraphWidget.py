@@ -15,8 +15,9 @@ class TemperatureGraphWidget(QtWidgets.QWidget):
     BED_COLOR = QtGui.QColor('#1f77b4')
     NOZZLE_COLOR = QtGui.QColor('#d62728')
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, compact=False, **kwargs):
         super().__init__(*args, **kwargs)
+        self.compact = compact
         self.samples = deque(maxlen=self.MAX_SAMPLES)  # (time, bedActual, bedTarget, nozzleActual, nozzleTarget)
 
         self.windowComboBox = QtWidgets.QComboBox()
@@ -31,7 +32,7 @@ class TemperatureGraphWidget(QtWidgets.QWidget):
         self.currentLabel = QtWidgets.QLabel('No readings yet')
 
         self.canvas = _Canvas(self)
-        self.canvas.setMinimumSize(260, 160)
+        self.canvas.setMinimumSize(*((170, 96) if compact else (260, 160)))
 
         top = QtWidgets.QHBoxLayout()
         top.addWidget(self.currentLabel, stretch=1)
@@ -39,9 +40,15 @@ class TemperatureGraphWidget(QtWidgets.QWidget):
         top.addWidget(self.clearButton)
 
         layout = QtWidgets.QVBoxLayout()
-        layout.addLayout(top)
+        if compact:
+            # Graph only (last 5 minutes); current values in the tooltip
+            for widget in (self.currentLabel, self.windowComboBox, self.clearButton):
+                widget.hide()
+            layout.setContentsMargins(0, 0, 0, 0)
+        else:
+            layout.addLayout(top)
+            layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(self.canvas, stretch=1)
-        layout.setContentsMargins(4, 4, 4, 4)
         self.setLayout(layout)
 
     def addReading(self, bedActual, bedTarget, nozzleActual, nozzleTarget):
@@ -49,6 +56,8 @@ class TemperatureGraphWidget(QtWidgets.QWidget):
         self.currentLabel.setText(f'<span style="color:{self.BED_COLOR.name()}">Bed {bedActual:.1f}/{bedTarget:.0f}°C</span>'
                                   f' &nbsp; <span style="color:{self.NOZZLE_COLOR.name()}">Nozzle '
                                   f'{nozzleActual:.1f}/{nozzleTarget:.0f}°C</span>')
+        if self.compact:
+            self.canvas.setToolTip(f'Bed {bedActual:.1f}/{bedTarget:.0f}\u00B0C, nozzle {nozzleActual:.1f}/{nozzleTarget:.0f}\u00B0C')
         if self.isVisible():
             self.canvas.update()
 
@@ -113,7 +122,8 @@ class _Canvas(QtWidgets.QWidget):
 
         if len(samples) < 2:
             painter.setPen(textColor)
-            painter.drawText(plot, QtCore.Qt.AlignCenter, 'Connect to the printer to see temperatures')
+            painter.drawText(plot, QtCore.Qt.AlignCenter | QtCore.Qt.TextWordWrap,
+                             'No readings yet' if self.graph.compact else 'Connect to the printer to see temperatures')
             return
 
         def drawSeries(index, color, dashed):
@@ -137,6 +147,16 @@ class _Canvas(QtWidgets.QWidget):
 
         # Legend
         painter.setPen(textColor)
+        if self.graph.compact:
+            # Current values instead of a legend
+            last = samples[-1]
+            painter.setPen(self.graph.BED_COLOR)
+            painter.drawText(QtCore.QRectF(plot.left() + 4, plot.top() + 2, plot.width() - 8, metrics.height()),
+                             QtCore.Qt.AlignLeft, f'Bed {last[1]:.0f}\u00B0')
+            painter.setPen(self.graph.NOZZLE_COLOR)
+            painter.drawText(QtCore.QRectF(plot.left() + 4, plot.top() + 2, plot.width() - 8, metrics.height()),
+                             QtCore.Qt.AlignRight, f'Noz {last[3]:.0f}\u00B0')
+            return
         legend = 'solid = actual, dashed = target'
         painter.drawText(QtCore.QRectF(plot.left() + 4, plot.top() + 2, plot.width() - 8, metrics.height()),
                          QtCore.Qt.AlignRight, legend)

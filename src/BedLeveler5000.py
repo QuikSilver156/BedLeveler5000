@@ -118,6 +118,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Manual widget
         self.manualWidget = ManualWidget()
+        self.manualWidget.useSettings(self.settings)
         self.manualWidget.probe.connect(
             lambda command, pointList: self._withSafetyCheck(
                 lambda: self._withHeatSoak(lambda: self.manualProbe(command, pointList))))
@@ -138,8 +139,43 @@ class MainWindow(QtWidgets.QMainWindow):
     def __layoutWidgets(self):
         layout = QtWidgets.QVBoxLayout()
         layout.addWidget(self.printerConnectWidget)
-        layout.addWidget(self.temperatureControlsWidget)
-        layout.addWidget(self.tabWidget)
+        # Temperature controls, with a mini camera and graph in the space beside them.
+        # These stay visible (and updating) even while a status window is open.
+        self.miniWebcam = WebcamWidget(self.settings, compact=True)
+        self.miniTemperatureGraph = TemperatureGraphWidget(compact=True)
+        self.miniPanel = QtWidgets.QWidget()
+        miniLayout = QtWidgets.QHBoxLayout()
+        miniLayout.setContentsMargins(0, 6, 0, 0)
+        miniLayout.addWidget(self.miniWebcam, stretch=4)
+        miniLayout.addWidget(self.miniTemperatureGraph, stretch=5)
+        self.miniPanel.setLayout(miniLayout)
+        self.miniPanel.setVisible(self.settings.value('miniPanel/visible', True) in (True, 'true', '1', 1))
+
+        temperatureRow = QtWidgets.QHBoxLayout()
+        temperatureRow.setContentsMargins(0, 0, 0, 0)
+        temperatureRow.addWidget(self.temperatureControlsWidget, stretch=0, alignment=QtCore.Qt.AlignTop)
+        temperatureRow.addWidget(self.miniPanel, stretch=1)
+        temperatureRowWidget = QtWidgets.QWidget()
+        temperatureRowWidget.setLayout(temperatureRow)
+        self.temperatureRowWidget = temperatureRowWidget
+
+        # Drag the divider to give the camera/graph or the tabs more room; it's remembered.
+        # When the window grows, both get a share of the extra height.
+        self.mainSplitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.mainSplitter.setChildrenCollapsible(False)
+        self.mainSplitter.addWidget(temperatureRowWidget)
+        self.mainSplitter.addWidget(self.tabWidget)
+        self.mainSplitter.setStretchFactor(0, 1)
+        self.mainSplitter.setStretchFactor(1, 2)
+        self.mainSplitter.setHandleWidth(8)
+        self.mainSplitter.handle(1).setToolTip('Drag to resize the camera and graph')
+        savedSizes = self.settings.value('mainSplitter/state')
+        if savedSizes is not None:
+            self.mainSplitter.restoreState(savedSizes)
+        self.mainSplitter.splitterMoved.connect(
+            lambda *args: self.settings.setValue('mainSplitter/state', self.mainSplitter.saveState()))
+        layout.addWidget(self.mainSplitter, stretch=1)
+        self._fitTemperatureRow()
 
         widget = QtWidgets.QWidget()
         widget.setLayout(layout)
@@ -212,6 +248,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.menuBar().addMenu(self.portsMenu)
 
         self.viewMenu = QtWidgets.QMenu('View', self)
+        self.miniPanelAction = QtGui.QAction('Camera and graph beside temperatures', self)
+        self.miniPanelAction.setCheckable(True)
+        self.miniPanelAction.setChecked(not self.miniPanel.isHidden())
+        self.miniPanelAction.toggled.connect(self._setMiniPanelVisible)
+        self.viewMenu.addAction(self.miniPanelAction)
+        self.viewMenu.addSeparator()
         self.webcamAction = self.webcamDock.toggleViewAction()
         self.webcamAction.setText('Webcam')
         self.webcamAction.setStatusTip('Show OctoPrint\'s webcams')
@@ -356,6 +398,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Start the temperature timer
         self.temperatureGraph.clear()
+        self.miniTemperatureGraph.clear()
         self.temperatureJobPending = False
         if not self.noTemperatureReporting:
             self.temperatureTimer.start()
@@ -455,6 +498,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def updateTemperatures(self, id_, context, result):
         self.temperatureJobPending = False
         self.temperatureGraph.addReading(result.bedActual, result.bedDesired, result.toolActual, result.toolDesired)
+        self.miniTemperatureGraph.addReading(result.bedActual, result.bedDesired, result.toolActual, result.toolDesired)
         self._trackBedTemperature(result)
         self.statusBar().setBedTemp(actual=result.bedActual, desired=result.bedDesired, power=result.bedPower)
         self.statusBar().setNozzleTemp(actual=result.toolActual, desired=result.toolDesired, power=result.toolPower)
@@ -726,10 +770,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 connection.write('M140 S0')
             if 'nozzle' in heaters:
                 connection.write('M104 S0')
-            # Give the commands a moment to leave before the port closes
-            loop = QtCore.QEventLoop()
-            QtCore.QTimer.singleShot(800, loop.quit)
-            loop.exec()
+
+            if hasattr(connection, 'waitForPosts'):
+                # OctoPrint: wait until it has confirmed each command (retrying if needed)
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+                try:
+                    failed = connection.waitForPosts(8000)
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                if failed:
+                    QtWidgets.QMessageBox.warning(
+                        self, 'Heaters may still be on',
+                        'OctoPrint did not confirm that the heaters were turned off.\n\n'
+                        'Turn them off in OctoPrint (Temperature tab) or on the printer.')
+            else:
+                # USB: give the commands a moment to leave before the port closes
+                loop = QtCore.QEventLoop()
+                QtCore.QTimer.singleShot(800, loop.quit)
+                loop.exec()
         return True
 
     def _userDisconnect(self, *args):
@@ -872,10 +930,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.printerConnectWidget.setOctoPrintMode(bool(enabled))
         self.updateState()
 
+    def _setMiniPanelVisible(self, visible):
+        self.miniPanel.setVisible(visible)
+        self.settings.setValue('miniPanel/visible', bool(visible))
+        self._fitTemperatureRow()
+
+    def _fitTemperatureRow(self):
+        """ Without the camera/graph, the temperature row shouldn't take extra height. """
+        if self.miniPanel.isHidden():
+            self.temperatureRowWidget.setMaximumHeight(self.temperatureRowWidget.minimumSizeHint().height())
+        else:
+            self.temperatureRowWidget.setMaximumHeight(16777215)
+
     def editOctoPrintSettings(self):
         accepted = OctoPrintSettingsDialog(self.settings, self).exec() == QtWidgets.QDialog.Accepted
         if accepted and self.webcamDock.isVisible():
             self.webcamWidget.reload()
+        if accepted and self.miniPanel.isVisible():
+            self.miniWebcam.reload()
         return accepted
 
     # ----- Sampling, history -----

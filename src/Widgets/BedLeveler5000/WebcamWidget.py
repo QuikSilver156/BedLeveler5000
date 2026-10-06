@@ -76,8 +76,9 @@ def camerasFromSettings(settingsJson, baseUrl):
 class WebcamWidget(QtWidgets.QWidget):
     FPS_CHOICES = [1, 2, 5, 10]
 
-    def __init__(self, settings, *args, **kwargs):
+    def __init__(self, settings, *args, compact=False, **kwargs):
         super().__init__(*args, **kwargs)
+        self.compact = compact
         self.settings = settings
         self.networkAccessManager = QtNetwork.QNetworkAccessManager(self)
         self.cameras = []
@@ -102,7 +103,7 @@ class WebcamWidget(QtWidgets.QWidget):
 
         self.imageLabel = QtWidgets.QLabel('Webcam')
         self.imageLabel.setAlignment(QtCore.Qt.AlignCenter)
-        self.imageLabel.setMinimumSize(240, 180)
+        self.imageLabel.setMinimumSize(*((128, 96) if compact else (240, 180)))
         self.imageLabel.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
         self.imageLabel.setStyleSheet('QLabel { background-color: black; color: #ccc; }')
         self.imageLabel.setWordWrap(True)
@@ -116,10 +117,25 @@ class WebcamWidget(QtWidgets.QWidget):
         top.addWidget(self.reloadButton)
 
         layout = QtWidgets.QVBoxLayout()
-        layout.addLayout(top)
+        if compact:
+            # Just the picture; click it to switch cameras
+            for widget in (self.cameraComboBox, self.fpsComboBox, self.reloadButton):
+                widget.hide()
+            self.imageLabel.setCursor(QtCore.Qt.PointingHandCursor)
+            self.imageLabel.setToolTip('Click to switch camera')
+            layout.setContentsMargins(0, 0, 0, 0)
+        else:
+            layout.addLayout(top)
+            layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(self.imageLabel, stretch=1)
-        layout.setContentsMargins(4, 4, 4, 4)
         self.setLayout(layout)
+
+    def mousePressEvent(self, event):
+        if self.compact and self.cameraComboBox.count() > 1:
+            self.cameraComboBox.setCurrentIndex((self.cameraComboBox.currentIndex() + 1) % self.cameraComboBox.count())
+        elif self.compact and self.cameraComboBox.count() == 0:
+            self.reload()
+        super().mousePressEvent(event)
 
     # ----- Camera list -----
     def reload(self):
@@ -170,7 +186,11 @@ class WebcamWidget(QtWidgets.QWidget):
 
     def _cameraChanged(self):
         if 0 <= self.cameraComboBox.currentIndex() < len(self.cameras):
-            self.settings.setValue('webcam/lastCamera', self.cameras[self.cameraComboBox.currentIndex()].name)
+            camera = self.cameras[self.cameraComboBox.currentIndex()]
+            self.settings.setValue('webcam/lastCamera', camera.name)
+            if self.compact:
+                hint = ' - click to switch camera' if len(self.cameras) > 1 else ''
+                self.imageLabel.setToolTip(f'{camera.name}{hint}')
         self.lastPixmap = None
         self._restart()
 
@@ -270,6 +290,14 @@ class WebcamWidget(QtWidgets.QWidget):
                                                              QtCore.Qt.SmoothTransformation))
 
     def _message(self, text):
+        if self.compact:
+            if 'OctoPrint first' in text:
+                text = 'Set up OctoPrint\n(Ports menu)\nto see cameras'
+            elif 'Asking' in text:
+                text = 'Loading cameras...'
+            elif 'no webcams' in text:
+                text = 'No cameras in OctoPrint'
+            self.imageLabel.setToolTip(text.replace('\n', ' '))
         self.lastPixmap = None
         self.imageLabel.setPixmap(QtGui.QPixmap())
         self.imageLabel.setText(text)
