@@ -41,6 +41,20 @@ class OctoPrintSettings(NamedTuple):
 # OctoPrint logs sent lines as "Send: N12 G28*45" (line number and checksum optional)
 SEND_PATTERN = re.compile(r'^(?:N\d+\s+)?(.*?)(?:\*\d+)?\s*$')
 
+# OctoPrint's terminal log marks lines either 'Send: '/'Recv: ' or '>>> '/'<<< '
+SEND_PREFIXES = ('Send: ', '>>> ')
+RECV_PREFIXES = ('Recv: ', '<<< ')
+
+def splitLogLine(logLine):
+    """ Returns ('send'|'recv'|None, text). """
+    for prefix in SEND_PREFIXES:
+        if logLine.startswith(prefix):
+            return 'send', logLine[len(prefix):]
+    for prefix in RECV_PREFIXES:
+        if logLine.startswith(prefix):
+            return 'recv', logLine[len(prefix):]
+    return None, logLine
+
 TEMPERATURE_REPORT = re.compile(r'^\s*T\d*:\s*-?[0-9.]+')
 
 def normalizeCommand(command):
@@ -116,7 +130,7 @@ class OctoPrintCommandConnection(CommandConnection):
 
     def _resetStats(self):
         self.stats = {'socketMessages': 0, 'liveUpdates': 0, 'sendLines': 0, 'recvLines': 0,
-                      'oursSent': 0, 'oursPosted': 0, 'lastLogLines': deque(maxlen=12),
+                      'oursSent': 0, 'oursPosted': 0, 'logLines': 0, 'lastLogLines': deque(maxlen=12),
                       'messageTypes': set()}
 
     def diagnostics(self):
@@ -131,9 +145,12 @@ class OctoPrintCommandConnection(CommandConnection):
         if s['liveUpdates'] == 0:
             return ('OctoPrint\'s push socket answered but sent no live updates, so it most likely rejected the '
                     f'login. Try generating a new Application Key in OctoPrint. (Message types received: {types})')
-        if s['sendLines'] == 0 and s['recvLines'] == 0:
+        if s['logLines'] == 0:
             return (f'OctoPrint sent {s["liveUpdates"]} live updates, but none contained terminal lines. '
                     f'(Message types received: {types})')
+        if s['sendLines'] == 0 and s['recvLines'] == 0:
+            return (f'OctoPrint sent {s["logLines"]} terminal lines, but in a format Bed Leveler doesn\'t '
+                    'recognize. Last lines seen:\n' + '\n'.join(s['lastLogLines']))
         if s['oursSent'] == 0:
             return (f'OctoPrint accepted {s["oursPosted"]} command(s), but none of them appeared in its terminal '
                     'log, so the replies could not be matched. Last lines seen:\n' + '\n'.join(s['lastLogLines']))
@@ -261,13 +278,15 @@ class OctoPrintCommandConnection(CommandConnection):
             self._processLogLine(logLine)
 
     def _processLogLine(self, logLine):
-        if logLine.startswith(('Send: ', 'Recv: ')):
-            self.stats['lastLogLines'].append(logLine)
-            self.logger.debug(f'OctoPrint log: {logLine}')
+        self.stats['logLines'] += 1
+        self.stats['lastLogLines'].append(logLine)
+        self.logger.debug(f'OctoPrint log: {logLine}')
 
-        if logLine.startswith('Send: '):
+        kind, text = splitLogLine(logLine)
+
+        if kind == 'send':
             self.stats['sendLines'] += 1
-            sent = SEND_PATTERN.match(logLine[len('Send: '):]).group(1)
+            sent = SEND_PATTERN.match(text).group(1)
             normalized = normalizeCommand(sent)
             # Exact match, or the same G/M code (OctoPrint can reformat parameters)
             isOurs = len(self._oursPending) > 0 and \
@@ -279,10 +298,10 @@ class OctoPrintCommandConnection(CommandConnection):
             self._sentFifo.append(isOurs)
             return
 
-        if not logLine.startswith('Recv: '):
+        if kind != 'recv':
             return
 
-        line = logLine[len('Recv: '):]
+        line = text
         self.stats['recvLines'] += 1
         if line.strip() == '' or line.strip() == 'wait':
             return
