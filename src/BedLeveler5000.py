@@ -54,6 +54,7 @@ class MainWindow(QtWidgets.QMainWindow):
         HEAT_SOAK = 'Heat soaking bed'
 
     NO_RESPONSE_TIMEOUT_MS = 10_000
+    OCTOPRINT_NO_RESPONSE_TIMEOUT_MS = 45_000
     SAMPLE_CHOICES = [1, 2, 3, 5]
     SOAK_CHOICES = [0, 2, 5, 10, 15]
     SOAK_TOLERANCE_C = 1.0
@@ -313,6 +314,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Watch for a printer that never answers (wrong port, wrong baud, ...)
         if self.printerConnectWidget.connectionMode() == ConnectionMode.MARLIN_2:
+            viaOctoPrint = self.printerConnectWidget.port() == PrinterConnectWidget.OCTOPRINT_PORT
+            self.noResponseTimer.setInterval(self.OCTOPRINT_NO_RESPONSE_TIMEOUT_MS if viaOctoPrint
+                                             else self.NO_RESPONSE_TIMEOUT_MS)
             self.noResponseTimer.start()
 
     def disconnectFromPrinter(self):
@@ -756,9 +760,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         port = self.printerConnectWidget.port()
         if port == PrinterConnectWidget.OCTOPRINT_PORT:
-            self._error(f'The printer has not responded through OctoPrint after {self.NO_RESPONSE_TIMEOUT_MS // 1000} seconds.\n\n'
-                        'Check that OctoPrint shows the printer as Operational and is not printing, and look at '
-                        'OctoPrint\'s Terminal tab for errors.')
+            details = self.printer.commandConnection.diagnostics()
+            self._error(f'No reply from the printer through OctoPrint after '
+                        f'{self.OCTOPRINT_NO_RESPONSE_TIMEOUT_MS // 1000} seconds.\n\n{details}')
             return
         self._error(f'The printer has not responded on {port} after {self.NO_RESPONSE_TIMEOUT_MS // 1000} seconds.\n\n'
                     'Things to check:\n'
