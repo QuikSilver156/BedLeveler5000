@@ -52,12 +52,14 @@ class MainWindow(QtWidgets.QMainWindow):
         UPDATING_MESH = 'Updating mesh'
         LIVE_ADJUST = 'Live adjust'
         HEAT_SOAK = 'Heat soaking bed'
+        SAFETY_CHECK = 'Checking the printer is idle'
 
     NO_RESPONSE_TIMEOUT_MS = 10_000
     OCTOPRINT_NO_RESPONSE_TIMEOUT_MS = 45_000
     SAMPLE_CHOICES = [1, 2, 3, 5]
     SOAK_CHOICES = [0, 2, 5, 10, 15]
     SOAK_TOLERANCE_C = 1.0
+    SAFETY_CHECK_TIMEOUT_MS = 15_000
 
     class Dialog(StrEnum):
         INITIALIZING = 'Initializing'
@@ -74,6 +76,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings = QtCore.QSettings('QuikSilver', 'BedLeveler5000')
         self.liveContext = None
         self.soakContext = None
+        self.safetyContext = None
+        self.heatersSetByApp = {'bed': False, 'nozzle': False}
         self.lastTemperatures = None
         self.bedAtTempSince = None
 
@@ -101,8 +105,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.printerConnectWidget = PrinterConnectWidget()
         self.printerConnectWidget.printerChanged.connect(self.switchPrinter)
         self.printerConnectWidget.connectRequested.connect(self.connectToPrinter)
-        self.printerConnectWidget.disconnectRequested.connect(self.disconnectFromPrinter)
-        self.printerConnectWidget.homeRequested.connect(self.home)
+        self.printerConnectWidget.disconnectRequested.connect(self._userDisconnect)
+        self.printerConnectWidget.homeRequested.connect(lambda: self._withSafetyCheck(self.home))
 
         # Temperature Controls Widget
         self.temperatureControlsWidget = TemperatureControlsWidget()
@@ -112,13 +116,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # Manual widget
         self.manualWidget = ManualWidget()
         self.manualWidget.probe.connect(
-            lambda command, pointList: self._withHeatSoak(lambda: self.manualProbe(command, pointList)))
+            lambda command, pointList: self._withSafetyCheck(
+                lambda: self._withHeatSoak(lambda: self.manualProbe(command, pointList))))
         self.manualWidget.liveAdjust.connect(
-            lambda point, name, z: self._withHeatSoak(lambda: self.startLiveAdjust(point, name, z)))
+            lambda point, name, z: self._withSafetyCheck(
+                lambda: self._withHeatSoak(lambda: self.startLiveAdjust(point, name, z))))
 
         # Mesh widget
         self.meshWidget = MeshWidget()
-        self.meshWidget.updateMesh.connect(lambda: self._withHeatSoak(lambda: self.updateMesh(0, 0)))
+        self.meshWidget.updateMesh.connect(
+            lambda: self._withSafetyCheck(lambda: self._withHeatSoak(lambda: self.updateMesh(0, 0))))
 
         # Tab widget
         self.tabWidget = QtWidgets.QTabWidget()
@@ -244,6 +251,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.noResponseTimer.setInterval(self.NO_RESPONSE_TIMEOUT_MS)
         self.noResponseTimer.timeout.connect(self._checkPrinterResponding)
 
+        self.safetyTimer = QtCore.QTimer()
+        self.safetyTimer.setSingleShot(True)
+        self.safetyTimer.setInterval(self.SAFETY_CHECK_TIMEOUT_MS)
+        self.safetyTimer.timeout.connect(self._safetyCheckTimedOut)
+
         self.soakTimer = QtCore.QTimer()
         self.soakTimer.setInterval(1000)
         self.soakTimer.timeout.connect(self._soakTick)
@@ -309,8 +321,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Initialize the printer
         self.updateState(self.State.INITIALIZING)
-        self.printer.init(self._createId('init'))
         self.dialogs[self.Dialog.INITIALIZING].show()
+        if isinstance(self.printer, Marlin2Printer):
+            # Init homes the printer, so make sure it isn't printing first
+            self._checkPrinterIdle(onIdle=lambda: self.printer.init(self._createId('init')),
+                                   onBusy=lambda detail: self._error(
+                                       f'The printer is printing from its SD card ({detail}). '
+                                       'Bed Leveler 5000 won\'t connect during a print. Wait for it to finish '
+                                       '(or stop it on the printer), then connect again.'))
+        else:
+            self.printer.init(self._createId('init'))
 
         # Watch for a printer that never answers (wrong port, wrong baud, ...)
         if self.printerConnectWidget.connectionMode() == ConnectionMode.MARLIN_2:
@@ -328,6 +348,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.noResponseTimer.stop()
         self.soakTimer.stop()
         self.soakContext = None
+        self.safetyTimer.stop()
+        self.safetyContext = None
+        self.heatersSetByApp = {'bed': False, 'nozzle': False}
         self.liveContext = None
         self.lastTemperatures = None
         self.bedAtTempSince = None
@@ -569,6 +592,124 @@ class MainWindow(QtWidgets.QMainWindow):
                                                f'automatically. Press Done when it reads close to +0.000.')
         self._liveProbe()
 
+    # ----- Fail-safes -----
+    def _checkPrinterIdle(self, onIdle, onBusy):
+        """ Asks the printer (M27) whether it is printing from SD, then calls onIdle() or onBusy(detail). """
+        connection = self.printer.commandConnection
+        busyReason = getattr(connection, 'busyReason', None)
+        if busyReason:
+            onBusy(f'OctoPrint reports it is {busyReason}')
+            return
+
+        self.safetyContext = {'onIdle': onIdle, 'onBusy': onBusy}
+        viaOctoPrint = self.printerConnectWidget.port() == PrinterConnectWidget.OCTOPRINT_PORT
+        self.safetyTimer.setInterval(self.OCTOPRINT_NO_RESPONSE_TIMEOUT_MS + 5_000 if viaOctoPrint
+                                     else self.SAFETY_CHECK_TIMEOUT_MS)
+        command = connection.sendM27()
+        command.finished.connect(lambda command, context=self.safetyContext: self._safetyCheckReply(command, context))
+        self.safetyTimer.start()
+
+    def _safetyCheckReply(self, command, context):
+        if context is not self.safetyContext:
+            return # Stale (disconnected or timed out)
+        self.safetyContext = None
+        self.safetyTimer.stop()
+
+        result = command.result or {'printing': False, 'detail': ''}
+        if result['printing']:
+            context['onBusy'](result['detail'])
+        else:
+            context['onIdle']()
+
+    def _safetyCheckTimedOut(self):
+        context = self.safetyContext
+        self.safetyContext = None
+        if context is None:
+            return
+        self._error('The printer didn\'t answer the "are you printing?" check (M27) within '
+                    f'{self.safetyTimer.interval() // 1000} seconds, so Bed Leveler 5000 stopped to be safe.')
+
+    def _withSafetyCheck(self, action):
+        """ Runs action only if the printer isn't printing (checked right before every move). """
+        if self.printer is None:
+            return
+        if not isinstance(self.printer, Marlin2Printer):
+            action()
+            return
+
+        self.updateState(self.State.SAFETY_CHECK)
+
+        def idle():
+            self.updateState(self.State.CONNECTED)
+            action()
+
+        def busy(detail):
+            self.updateState(self.State.CONNECTED)
+            self._warning(f'The printer is busy printing ({detail}). Bed Leveler 5000 won\'t move it until the '
+                          'print has finished.')
+
+        self._checkPrinterIdle(onIdle=idle, onBusy=busy)
+
+    def _heatersOn(self):
+        temperatures = self.lastTemperatures
+        on = []
+        if self.heatersSetByApp['bed'] or (temperatures is not None and temperatures.bedDesired > 0):
+            on.append('bed')
+        if self.heatersSetByApp['nozzle'] or (temperatures is not None and temperatures.toolDesired > 0):
+            on.append('nozzle')
+        return on
+
+    def _offerHeatersOff(self):
+        """ Returns False if the user cancelled. Sends M140 S0 / M104 S0 if they choose to. """
+        if self.printer is None or not self.printer.connected():
+            return True
+        heaters = self._heatersOn()
+        if not heaters:
+            return True
+
+        answer = QtWidgets.QMessageBox.question(
+            self, 'Heaters are on',
+            f'The {" and ".join(heaters)} heater{"s are" if len(heaters) > 1 else " is"} still on.\n\n'
+            'Turn off before disconnecting?',
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes)
+        if answer == QtWidgets.QMessageBox.Cancel:
+            return False
+        if answer == QtWidgets.QMessageBox.Yes and isinstance(self.printer, Marlin2Printer):
+            connection = self.printer.commandConnection
+            self.temperatureTimer.stop()
+            self.noResponseTimer.stop()
+            connection.ignoreReplies = True
+            if 'bed' in heaters:
+                connection.write('M140 S0')
+            if 'nozzle' in heaters:
+                connection.write('M104 S0')
+            # Give the commands a moment to leave before the port closes
+            loop = QtCore.QEventLoop()
+            QtCore.QTimer.singleShot(800, loop.quit)
+            loop.exec()
+        return True
+
+    def _userDisconnect(self, *args):
+        if self._offerHeatersOff():
+            self.disconnectFromPrinter()
+
+    def closeEvent(self, event):
+        if self.printer is not None and self.printer.connected():
+            if self.state not in (self.State.CONNECTED, self.State.DISCONNECTED):
+                answer = QtWidgets.QMessageBox.question(
+                    self, 'Printer is busy',
+                    f'Bed Leveler 5000 is still working ({self.state}). Quit anyway?',
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+                if answer != QtWidgets.QMessageBox.Yes:
+                    event.ignore()
+                    return
+            if not self._offerHeatersOff():
+                event.ignore()
+                return
+            self.disconnectFromPrinter()
+        event.accept()
+
     # ----- Heat soak -----
     def heatSoakMinutes(self):
         try:
@@ -786,9 +927,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.printerConnectWidget.selectPort(str(lastPort))
 
     def setBedTemperature(self, state, temp):
+        self.heatersSetByApp['bed'] = bool(state and temp > 0)
         self.printer.setBedTemperature(self._createId('setBedTemperature'), temperature=temp if state else 0)
 
     def setNozzleTemperature(self, state, temp):
+        self.heatersSetByApp['nozzle'] = bool(state and temp > 0)
         self.printer.setNozzleTemperature(self._createId('setNozzleTemperature'), temperature=temp if state else 0)
 
     def _cancel(self):

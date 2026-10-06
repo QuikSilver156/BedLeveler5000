@@ -55,6 +55,19 @@ def splitLogLine(logLine):
             return 'recv', logLine[len(prefix):]
     return None, logLine
 
+# Commands that move the machine. If one of these appears in OctoPrint's log
+# and it isn't ours, someone else is driving the printer.
+MOTION_CODES = {'G0', 'G1', 'G2', 'G3', 'G28', 'G29', 'G30', 'G38.2', 'G38.3', 'G80', 'M48'}
+
+# OctoPrint state flags that mean the printer is busy with a job
+BUSY_FLAGS = ('printing', 'paused', 'pausing', 'resuming', 'cancelling', 'finishing')
+
+def busyReasonFromFlags(flags):
+    for flag in BUSY_FLAGS:
+        if flags.get(flag):
+            return flag
+    return None
+
 TEMPERATURE_REPORT = re.compile(r'^\s*T\d*:\s*-?[0-9.]+')
 
 def normalizeCommand(command):
@@ -106,6 +119,17 @@ def checkSettings(settings, networkAccessManager=None):
     except (ValueError, KeyError, TypeError):
         state = 'Unknown'
 
+    # Refuse while a job is running or paused
+    status, payload, error = request(networkAccessManager, settings, 'GET', '/api/printer?exclude=temperature,sd')
+    try:
+        flags = json.loads(payload)['state']['flags']
+    except (ValueError, KeyError, TypeError):
+        flags = {}
+    busy = busyReasonFromFlags(flags)
+    if busy:
+        return False, f'OctoPrint reports the printer is {busy} ("{state}"). Wait for the job to finish ' \
+                      f'(or cancel it) before leveling.'
+
     if state not in ('Operational',):
         return False, f'OctoPrint {version} is reachable, but its printer state is "{state}". ' \
                       f'Connect OctoPrint to the printer (and make sure nothing is printing) first.'
@@ -127,6 +151,7 @@ class OctoPrintCommandConnection(CommandConnection):
         self._oursPending = deque()   # normalized commands we've posted but not yet seen sent
         self._replies = set()
         self._resetStats()
+        self.busyReason = None
 
     def _resetStats(self):
         self.stats = {'socketMessages': 0, 'liveUpdates': 0, 'sendLines': 0, 'recvLines': 0,
@@ -269,9 +294,17 @@ class OctoPrintCommandConnection(CommandConnection):
             return
         self.stats['liveUpdates'] += 1
 
-        state = (current.get('state') or {}).get('text')
+        stateInfo = current.get('state') or {}
+        state = stateInfo.get('text')
         if state and state.startswith(('Offline', 'Error', 'Closed')) and self._isOpen:
             self.connectionError.emit(f'OctoPrint lost the printer (state: {state}).')
+            return
+
+        # Fail-safe: stop immediately if a job starts in OctoPrint while we're connected
+        self.busyReason = busyReasonFromFlags(stateInfo.get('flags') or {})
+        if self.busyReason and self._isOpen:
+            self.connectionError.emit(f'OctoPrint reports the printer is {self.busyReason} ("{state}"). '
+                                      'Bed Leveler 5000 disconnected so it can\'t interfere with the job.')
             return
 
         for logLine in current.get('logs') or []:
@@ -295,6 +328,11 @@ class OctoPrintCommandConnection(CommandConnection):
             if isOurs:
                 self._oursPending.popleft()
                 self.stats['oursSent'] += 1
+            elif self._isOpen and normalized.split()[:1] and normalized.split()[0] in MOTION_CODES:
+                # Fail-safe: another OctoPrint user, plugin or terminal is moving the printer
+                self.connectionError.emit(f'Another program sent a movement command through OctoPrint '
+                                          f'("{sent.strip()}"). Bed Leveler 5000 disconnected so the two '
+                                          'don\'t fight over the printer. Wait for it to finish, then reconnect.')
             self._sentFifo.append(isOurs)
             return
 
