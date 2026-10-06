@@ -112,6 +112,33 @@ class OctoPrintCommandConnection(CommandConnection):
         self._sentFifo = deque()      # [isOurs] for every command OctoPrint logged as sent
         self._oursPending = deque()   # normalized commands we've posted but not yet seen sent
         self._replies = set()
+        self._resetStats()
+
+    def _resetStats(self):
+        self.stats = {'socketMessages': 0, 'liveUpdates': 0, 'sendLines': 0, 'recvLines': 0,
+                      'oursSent': 0, 'oursPosted': 0, 'lastLogLines': deque(maxlen=12),
+                      'messageTypes': set()}
+
+    def diagnostics(self):
+        """ Plain-language summary of what has come back from OctoPrint so far. """
+        s = self.stats
+        if s['socketMessages'] == 0:
+            return ('Nothing has arrived on OctoPrint\'s push socket. The connection to '
+                    f'{self.settings.socketUrl()} opened but stayed silent - this usually means a proxy or '
+                    'remote-access service (e.g. OctoEverywhere) is in between. Use OctoPrint\'s local address '
+                    '(like http://octopi.local or its IP address) instead.')
+        types = ', '.join(sorted(s['messageTypes'])) or 'none'
+        if s['liveUpdates'] == 0:
+            return ('OctoPrint\'s push socket answered but sent no live updates, so it most likely rejected the '
+                    f'login. Try generating a new Application Key in OctoPrint. (Message types received: {types})')
+        if s['sendLines'] == 0 and s['recvLines'] == 0:
+            return (f'OctoPrint sent {s["liveUpdates"]} live updates, but none contained terminal lines. '
+                    f'(Message types received: {types})')
+        if s['oursSent'] == 0:
+            return (f'OctoPrint accepted {s["oursPosted"]} command(s), but none of them appeared in its terminal '
+                    'log, so the replies could not be matched. Last lines seen:\n' + '\n'.join(s['lastLogLines']))
+        return ('Commands reached the printer, but no reply has finished yet (homing can take a while). '
+                'Last lines seen:\n' + '\n'.join(s['lastLogLines']))
 
     # ----- SerialConnection interface -----
     def connected(self):
@@ -158,6 +185,7 @@ class OctoPrintCommandConnection(CommandConnection):
 
         self._sentFifo.clear()
         self._oursPending.clear()
+        self._resetStats()
         self.linesReceived = 0
         self._isOpen = True
         self._ready = True
@@ -179,6 +207,7 @@ class OctoPrintCommandConnection(CommandConnection):
     def write(self, string):
         command = string.strip()
         self._oursPending.append(normalizeCommand(command))
+        self.stats['oursPosted'] += 1
 
         qtRequest = QtNetwork.QNetworkRequest(QtCore.QUrl(self.settings.baseUrl() + '/api/printer/command'))
         qtRequest.setRawHeader(b'X-Api-Key', self.settings.apiKey.strip().encode())
@@ -208,15 +237,20 @@ class OctoPrintCommandConnection(CommandConnection):
             self.connectionError.emit('Lost the connection to OctoPrint.')
 
     def _socketMessage(self, text):
+        self.stats['socketMessages'] += 1
         try:
             message = json.loads(text)
         except ValueError:
             return
+        if isinstance(message, dict):
+            self.stats['messageTypes'].update(message.keys())
+            self.logger.debug(f'OctoPrint push message: {", ".join(message.keys())}')
 
         # Only live updates; 'history' holds log lines from before we connected
         current = message.get('current') if isinstance(message, dict) else None
         if not current:
             return
+        self.stats['liveUpdates'] += 1
 
         state = (current.get('state') or {}).get('text')
         if state and state.startswith(('Offline', 'Error', 'Closed')) and self._isOpen:
@@ -227,7 +261,12 @@ class OctoPrintCommandConnection(CommandConnection):
             self._processLogLine(logLine)
 
     def _processLogLine(self, logLine):
+        if logLine.startswith(('Send: ', 'Recv: ')):
+            self.stats['lastLogLines'].append(logLine)
+            self.logger.debug(f'OctoPrint log: {logLine}')
+
         if logLine.startswith('Send: '):
+            self.stats['sendLines'] += 1
             sent = SEND_PATTERN.match(logLine[len('Send: '):]).group(1)
             normalized = normalizeCommand(sent)
             # Exact match, or the same G/M code (OctoPrint can reformat parameters)
@@ -236,8 +275,7 @@ class OctoPrintCommandConnection(CommandConnection):
                       self._oursPending[0].split()[:1] == normalized.split()[:1])
             if isOurs:
                 self._oursPending.popleft()
-            elif normalized.startswith('M110'):
-                return # Line number reset; OctoPrint swallows its reply
+                self.stats['oursSent'] += 1
             self._sentFifo.append(isOurs)
             return
 
@@ -245,6 +283,7 @@ class OctoPrintCommandConnection(CommandConnection):
             return
 
         line = logLine[len('Recv: '):]
+        self.stats['recvLines'] += 1
         if line.strip() == '' or line.strip() == 'wait':
             return
 
