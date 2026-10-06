@@ -37,6 +37,8 @@ class ManualWidget(QtWidgets.QWidget):
         super().__init__(*args, **kwargs)
 
         self.fixedMap = None
+        self.settings = None
+        self.printerInfo = None
         self.lastResults = None
         self.lastReferenceName = None
         self.lastInteriorNames = None
@@ -134,6 +136,36 @@ class ManualWidget(QtWidgets.QWidget):
             knobs = [p for p in printerInfo.manualProbePoints if p.name not in interior]
             defaultReference = knobs[0] if knobs else printerInfo.manualProbePoints[0]
         self.referenceComboBox.setCurrentText(defaultReference.name)
+
+        # Restore the reference last used with this printer
+        if self.settings is not None:
+            saved = self.settings.value(self._referenceKey())
+            if saved and self.referenceComboBox.findText(str(saved)) >= 0:
+                self.referenceComboBox.setCurrentText(str(saved))
+
+    # ----- Remembered options -----
+    def _referenceKey(self):
+        name = self.printerInfo.displayName if self.printerInfo is not None else ''
+        return f'manual/reference/{name}'
+
+    def useSettings(self, settings):
+        """ Restores Direction and Output from settings and saves Reference, Direction and Output
+            whenever they change. Reference is remembered per printer profile. """
+        self.settings = settings
+
+        direction = settings.value('manual/direction')
+        if direction and self.directionComboBox.findText(str(direction)) >= 0:
+            self.directionComboBox.setCurrentText(str(direction))
+        output = settings.value('manual/output')
+        if output and self.outputComboBox.findText(str(output)) >= 0:
+            self.outputComboBox.setCurrentText(str(output))
+
+        self.directionComboBox.currentIndexChanged.connect(
+            lambda: self.settings.setValue('manual/direction', self.directionComboBox.currentText()))
+        self.outputComboBox.currentIndexChanged.connect(
+            lambda: self.settings.setValue('manual/output', self.outputComboBox.currentText()))
+        self.referenceComboBox.activated.connect(
+            lambda: self.settings.setValue(self._referenceKey(), self.referenceComboBox.currentText()))
 
     def clear(self):
         self.previousCommand = None

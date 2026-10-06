@@ -118,6 +118,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Manual widget
         self.manualWidget = ManualWidget()
+        self.manualWidget.useSettings(self.settings)
         self.manualWidget.probe.connect(
             lambda command, pointList: self._withSafetyCheck(
                 lambda: self._withHeatSoak(lambda: self.manualProbe(command, pointList))))
