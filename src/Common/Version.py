@@ -41,7 +41,7 @@ def version():
     return f'v{majorVersion()}.{minorVersion()}.{patchVersion()}'
 
 # Community build identifier shown in the About dialog and window titles
-COMMUNITY_VERSION = 'v0.8.3-QS'
+COMMUNITY_VERSION = 'v0.8.4-QS'
 COMMUNITY_BASE = 'v0.6.0'
 
 def displayVersion():
