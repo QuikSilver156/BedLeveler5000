@@ -138,7 +138,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def __layoutWidgets(self):
         layout = QtWidgets.QVBoxLayout()
         layout.addWidget(self.printerConnectWidget)
-        layout.addWidget(self.temperatureControlsWidget)
+        # Temperature controls, with a mini camera and graph in the space beside them.
+        # These stay visible (and updating) even while a status window is open.
+        self.miniWebcam = WebcamWidget(self.settings, compact=True)
+        self.miniTemperatureGraph = TemperatureGraphWidget(compact=True)
+        self.miniPanel = QtWidgets.QWidget()
+        miniLayout = QtWidgets.QHBoxLayout()
+        miniLayout.setContentsMargins(0, 6, 0, 0)
+        miniLayout.addWidget(self.miniWebcam, stretch=4)
+        miniLayout.addWidget(self.miniTemperatureGraph, stretch=5)
+        self.miniPanel.setLayout(miniLayout)
+        self.miniPanel.setVisible(self.settings.value('miniPanel/visible', True) in (True, 'true', '1', 1))
+
+        temperatureRow = QtWidgets.QHBoxLayout()
+        temperatureRow.addWidget(self.temperatureControlsWidget, stretch=0)
+        temperatureRow.addWidget(self.miniPanel, stretch=1)
+        layout.addLayout(temperatureRow)
         layout.addWidget(self.tabWidget)
 
         widget = QtWidgets.QWidget()
@@ -212,6 +227,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.menuBar().addMenu(self.portsMenu)
 
         self.viewMenu = QtWidgets.QMenu('View', self)
+        self.miniPanelAction = QtGui.QAction('Camera and graph beside temperatures', self)
+        self.miniPanelAction.setCheckable(True)
+        self.miniPanelAction.setChecked(not self.miniPanel.isHidden())
+        self.miniPanelAction.toggled.connect(self._setMiniPanelVisible)
+        self.viewMenu.addAction(self.miniPanelAction)
+        self.viewMenu.addSeparator()
         self.webcamAction = self.webcamDock.toggleViewAction()
         self.webcamAction.setText('Webcam')
         self.webcamAction.setStatusTip('Show OctoPrint\'s webcams')
@@ -356,6 +377,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Start the temperature timer
         self.temperatureGraph.clear()
+        self.miniTemperatureGraph.clear()
         self.temperatureJobPending = False
         if not self.noTemperatureReporting:
             self.temperatureTimer.start()
@@ -455,6 +477,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def updateTemperatures(self, id_, context, result):
         self.temperatureJobPending = False
         self.temperatureGraph.addReading(result.bedActual, result.bedDesired, result.toolActual, result.toolDesired)
+        self.miniTemperatureGraph.addReading(result.bedActual, result.bedDesired, result.toolActual, result.toolDesired)
         self._trackBedTemperature(result)
         self.statusBar().setBedTemp(actual=result.bedActual, desired=result.bedDesired, power=result.bedPower)
         self.statusBar().setNozzleTemp(actual=result.toolActual, desired=result.toolDesired, power=result.toolPower)
@@ -886,10 +909,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.printerConnectWidget.setOctoPrintMode(bool(enabled))
         self.updateState()
 
+    def _setMiniPanelVisible(self, visible):
+        self.miniPanel.setVisible(visible)
+        self.settings.setValue('miniPanel/visible', bool(visible))
+
     def editOctoPrintSettings(self):
         accepted = OctoPrintSettingsDialog(self.settings, self).exec() == QtWidgets.QDialog.Accepted
         if accepted and self.webcamDock.isVisible():
             self.webcamWidget.reload()
+        if accepted and self.miniPanel.isVisible():
+            self.miniWebcam.reload()
         return accepted
 
     # ----- Sampling, history -----
