@@ -146,10 +146,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.miniPanel = QtWidgets.QWidget()
         miniLayout = QtWidgets.QHBoxLayout()
         miniLayout.setContentsMargins(0, 6, 0, 0)
-        miniLayout.addWidget(self.miniWebcam, stretch=4)
         miniLayout.addWidget(self.miniTemperatureGraph, stretch=5)
+        miniLayout.addWidget(self.miniWebcam, stretch=4)
         self.miniPanel.setLayout(miniLayout)
-        self.miniPanel.setVisible(self.settings.value('miniPanel/visible', True) in (True, 'true', '1', 1))
+        self.miniPanelEnabled = self.settings.value('miniPanel/visible', True) in (True, 'true', '1', 1)
 
         temperatureRow = QtWidgets.QHBoxLayout()
         temperatureRow.setContentsMargins(0, 0, 0, 0)
@@ -175,7 +175,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mainSplitter.splitterMoved.connect(
             lambda *args: self.settings.setValue('mainSplitter/state', self.mainSplitter.saveState()))
         layout.addWidget(self.mainSplitter, stretch=1)
-        self._fitTemperatureRow()
 
         widget = QtWidgets.QWidget()
         widget.setLayout(layout)
@@ -201,6 +200,11 @@ class MainWindow(QtWidgets.QMainWindow):
                                         QtCore.Qt.BottomDockWidgetArea)
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.webcamDock)
         self.splitDockWidget(self.webcamDock, self.temperatureDock, QtCore.Qt.Vertical)
+
+        # Don't show the small camera/graph while the matching larger panel is open
+        self.webcamDock.visibilityChanged.connect(lambda visible: self._updateMiniPanel())
+        self.temperatureDock.visibilityChanged.connect(lambda visible: self._updateMiniPanel())
+        self._updateMiniPanel()
         self.webcamDock.setVisible(self.settings.value('webcam/visible', False) in (True, 'true', '1', 1))
         # Remember whether the panel is open, but not when it hides because the window is closing
         self.webcamDock.visibilityChanged.connect(
@@ -250,7 +254,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewMenu = QtWidgets.QMenu('View', self)
         self.miniPanelAction = QtGui.QAction('Camera and graph beside temperatures', self)
         self.miniPanelAction.setCheckable(True)
-        self.miniPanelAction.setChecked(not self.miniPanel.isHidden())
+        self.miniPanelAction.setChecked(self.miniPanelEnabled)
         self.miniPanelAction.toggled.connect(self._setMiniPanelVisible)
         self.viewMenu.addAction(self.miniPanelAction)
         self.viewMenu.addSeparator()
@@ -931,8 +935,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.updateState()
 
     def _setMiniPanelVisible(self, visible):
-        self.miniPanel.setVisible(visible)
-        self.settings.setValue('miniPanel/visible', bool(visible))
+        self.miniPanelEnabled = bool(visible)
+        self.settings.setValue('miniPanel/visible', self.miniPanelEnabled)
+        self._updateMiniPanel()
+
+    def _updateMiniPanel(self):
+        """ Small graph and camera beside the temperatures, each hidden while its larger panel is open. """
+        if self.closingWindow:
+            return
+        showGraph = self.miniPanelEnabled and self.temperatureDock.isHidden()
+        showWebcam = self.miniPanelEnabled and self.webcamDock.isHidden()
+        self.miniTemperatureGraph.setVisible(showGraph)
+        self.miniWebcam.setVisible(showWebcam)
+        self.miniPanel.setVisible(showGraph or showWebcam)
         self._fitTemperatureRow()
 
     def _fitTemperatureRow(self):
@@ -946,7 +961,7 @@ class MainWindow(QtWidgets.QMainWindow):
         accepted = OctoPrintSettingsDialog(self.settings, self).exec() == QtWidgets.QDialog.Accepted
         if accepted and self.webcamDock.isVisible():
             self.webcamWidget.reload()
-        if accepted and self.miniPanel.isVisible():
+        if accepted and not self.miniWebcam.isHidden():
             self.miniWebcam.reload()
         return accepted
 
