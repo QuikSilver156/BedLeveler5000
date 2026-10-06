@@ -151,10 +151,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.miniPanel.setVisible(self.settings.value('miniPanel/visible', True) in (True, 'true', '1', 1))
 
         temperatureRow = QtWidgets.QHBoxLayout()
-        temperatureRow.addWidget(self.temperatureControlsWidget, stretch=0)
+        temperatureRow.setContentsMargins(0, 0, 0, 0)
+        temperatureRow.addWidget(self.temperatureControlsWidget, stretch=0, alignment=QtCore.Qt.AlignTop)
         temperatureRow.addWidget(self.miniPanel, stretch=1)
-        layout.addLayout(temperatureRow)
-        layout.addWidget(self.tabWidget)
+        temperatureRowWidget = QtWidgets.QWidget()
+        temperatureRowWidget.setLayout(temperatureRow)
+        self.temperatureRowWidget = temperatureRowWidget
+
+        # Drag the divider to give the camera/graph or the tabs more room; it's remembered.
+        # When the window grows, both get a share of the extra height.
+        self.mainSplitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.mainSplitter.setChildrenCollapsible(False)
+        self.mainSplitter.addWidget(temperatureRowWidget)
+        self.mainSplitter.addWidget(self.tabWidget)
+        self.mainSplitter.setStretchFactor(0, 1)
+        self.mainSplitter.setStretchFactor(1, 2)
+        self.mainSplitter.setHandleWidth(8)
+        self.mainSplitter.handle(1).setToolTip('Drag to resize the camera and graph')
+        savedSizes = self.settings.value('mainSplitter/state')
+        if savedSizes is not None:
+            self.mainSplitter.restoreState(savedSizes)
+        self.mainSplitter.splitterMoved.connect(
+            lambda *args: self.settings.setValue('mainSplitter/state', self.mainSplitter.saveState()))
+        layout.addWidget(self.mainSplitter, stretch=1)
+        self._fitTemperatureRow()
 
         widget = QtWidgets.QWidget()
         widget.setLayout(layout)
@@ -912,6 +932,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _setMiniPanelVisible(self, visible):
         self.miniPanel.setVisible(visible)
         self.settings.setValue('miniPanel/visible', bool(visible))
+        self._fitTemperatureRow()
+
+    def _fitTemperatureRow(self):
+        """ Without the camera/graph, the temperature row shouldn't take extra height. """
+        if self.miniPanel.isHidden():
+            self.temperatureRowWidget.setMaximumHeight(self.temperatureRowWidget.minimumSizeHint().height())
+        else:
+            self.temperatureRowWidget.setMaximumHeight(16777215)
 
     def editOctoPrintSettings(self):
         accepted = OctoPrintSettingsDialog(self.settings, self).exec() == QtWidgets.QDialog.Accepted
