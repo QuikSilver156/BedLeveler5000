@@ -15,6 +15,7 @@ from .Commands.CommandM114 import CommandM114
 from .Commands.CommandM118 import CommandM118
 from .Commands.CommandM140 import CommandM140
 from .Commands.CommandM211 import CommandM211
+from .Commands.CommandM27 import CommandM27
 from .Commands.CommandM400 import CommandM400
 from .Commands.CommandM420 import CommandM420
 from .Commands.CommandM851 import CommandM851
@@ -37,6 +38,7 @@ class CommandConnection(SerialConnection):
     finishedM118 = QtCore.Signal(CommandM118)
     finishedM140 = QtCore.Signal(CommandM140)
     finishedM211 = QtCore.Signal(CommandM211)
+    finishedM27 = QtCore.Signal(CommandM27)
     finishedM400 = QtCore.Signal(CommandM400)
     finishedM420 = QtCore.Signal(CommandM420)
     finishedM851 = QtCore.Signal(CommandM851)
@@ -46,12 +48,17 @@ class CommandConnection(SerialConnection):
 
         self.commandQueue = queue.SimpleQueue()
         self.currentCommand = None
+        self.ignoreReplies = False
 
     def pendingCount(self):
         return self.commandQueue.qsize()
 
     def _processLine(self, line):
         """ Improve error handling here """
+
+        # Set while shutting down (e.g. after sending heaters-off just before closing)
+        if self.ignoreReplies:
+            return
 
         # Skip auto reported messages when there are no commands
         if self.currentCommand is None:
@@ -116,6 +123,9 @@ class CommandConnection(SerialConnection):
 
     def sendM211(self, *args, **kwargs):
         return self._createCommand(CommandM211, *args, **kwargs)
+
+    def sendM27(self, *args, **kwargs):
+        return self._createCommand(CommandM27, *args, **kwargs)
 
     def sendM400(self, *args, **kwargs):
         return self._createCommand(CommandM400, *args, **kwargs)
