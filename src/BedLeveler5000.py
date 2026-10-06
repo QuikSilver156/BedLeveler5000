@@ -19,6 +19,8 @@ from Dialogs.FatalErrorDialog import FatalErrorDialog
 from Common import Version
 from Common import History
 from Common import PortScanner
+from Dialogs.OctoPrintSettingsDialog import OctoPrintSettingsDialog
+from Dialogs.OctoPrintSettingsDialog import loadSettings as loadOctoPrintSettings
 from PySide6 import QtCore
 from PySide6 import QtGui
 from PySide6 import QtWidgets
@@ -28,6 +30,7 @@ from enum import StrEnum
 import json
 import shutil
 import statistics
+import time
 import logging
 import pathlib
 import signal
@@ -48,15 +51,19 @@ class MainWindow(QtWidgets.QMainWindow):
         MANUAL_PROBE = 'Manually probing point'
         UPDATING_MESH = 'Updating mesh'
         LIVE_ADJUST = 'Live adjust'
+        HEAT_SOAK = 'Heat soaking bed'
 
     NO_RESPONSE_TIMEOUT_MS = 10_000
     SAMPLE_CHOICES = [1, 2, 3, 5]
+    SOAK_CHOICES = [0, 2, 5, 10, 15]
+    SOAK_TOLERANCE_C = 1.0
 
     class Dialog(StrEnum):
         INITIALIZING = 'Initializing'
         HOMING = 'Homing'
         PROBE = 'Probe'
         LIVE = 'Live'
+        SOAK = 'Soak'
 
     def __init__(self, *args, printersDir, printer=None, host=None, port=None, noTemperatureReporting=False, **kwargs):
         super().__init__(*args, **kwargs)
@@ -65,6 +72,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logger = logging.getLogger(QtCore.QCoreApplication.applicationName())
         self.settings = QtCore.QSettings('QuikSilver', 'BedLeveler5000')
         self.liveContext = None
+        self.soakContext = None
+        self.lastTemperatures = None
+        self.bedAtTempSince = None
 
         self.__createWidgets()
         self.__layoutWidgets()
@@ -80,6 +90,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.printerQtConnections = []
         self.noTemperatureReporting = noTemperatureReporting
         self.printerConnectWidget.loadPrinters(printersDir, desiredPrinter=printer, desiredHost=host, desiredPort=port)
+        self.printerConnectWidget.setOctoPrintMode(self.octoPrintEnabled())
         if printer is None:
             self._restoreLastConnection()
         self.updateState(self.State.DISCONNECTED)
@@ -99,12 +110,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Manual widget
         self.manualWidget = ManualWidget()
-        self.manualWidget.probe.connect(self.manualProbe)
-        self.manualWidget.liveAdjust.connect(self.startLiveAdjust)
+        self.manualWidget.probe.connect(
+            lambda command, pointList: self._withHeatSoak(lambda: self.manualProbe(command, pointList)))
+        self.manualWidget.liveAdjust.connect(
+            lambda point, name, z: self._withHeatSoak(lambda: self.startLiveAdjust(point, name, z)))
 
         # Mesh widget
         self.meshWidget = MeshWidget()
-        self.meshWidget.updateMesh.connect(self.updateMesh)
+        self.meshWidget.updateMesh.connect(lambda: self._withHeatSoak(lambda: self.updateMesh(0, 0)))
 
         # Tab widget
         self.tabWidget = QtWidgets.QTabWidget()
@@ -149,6 +162,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autoDetectAction.setStatusTip('Ask each COM port for M115 and select the one the printer answers on')
         self.autoDetectAction.triggered.connect(self.autoDetectPrinter)
         self.portsMenu.addAction(self.autoDetectAction)
+        self.portsMenu.addSeparator()
+        self.useOctoPrintAction = QtGui.QAction('Connect through OctoPrint', self)
+        self.useOctoPrintAction.setCheckable(True)
+        self.useOctoPrintAction.setChecked(self.octoPrintEnabled())
+        self.useOctoPrintAction.setStatusTip('Send commands through OctoPrint so it can stay connected to the printer')
+        self.useOctoPrintAction.toggled.connect(self.setOctoPrintEnabled)
+        self.portsMenu.addAction(self.useOctoPrintAction)
+        self.octoPrintSettingsAction = QtGui.QAction('OctoPrint settings...', self)
+        self.octoPrintSettingsAction.triggered.connect(self.editOctoPrintSettings)
+        self.portsMenu.addAction(self.octoPrintSettingsAction)
         self.menuBar().addMenu(self.portsMenu)
 
         self.settingsMenu = QtWidgets.QMenu('Settings', self)
@@ -164,6 +187,18 @@ class MainWindow(QtWidgets.QMainWindow):
             action.triggered.connect(lambda checked=False, count=count: self.settings.setValue('samplesPerPoint', count))
             self.samplesActionGroup.addAction(action)
             self.samplesMenu.addAction(action)
+
+        self.soakMenu = self.settingsMenu.addMenu('Heat soak before probing')
+        self.soakActionGroup = QtGui.QActionGroup(self)
+        self.soakActionGroup.setExclusive(True)
+        currentSoak = self.heatSoakMinutes()
+        for minutes in self.SOAK_CHOICES:
+            action = QtGui.QAction('Off' if minutes == 0 else f'{minutes} minutes', self)
+            action.setCheckable(True)
+            action.setChecked(minutes == currentSoak)
+            action.triggered.connect(lambda checked=False, minutes=minutes: self.settings.setValue('heatSoakMinutes', minutes))
+            self.soakActionGroup.addAction(action)
+            self.soakMenu.addAction(action)
         self.menuBar().addMenu(self.settingsMenu)
 
         self.helpMenu = QtWidgets.QMenu('Help', self)
@@ -192,6 +227,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dialogs[self.Dialog.LIVE].button(QtWidgets.QMessageBox.Cancel).setText('Done')
         self.dialogs[self.Dialog.LIVE].rejected.connect(self._cancel)
 
+        self.dialogs[self.Dialog.SOAK] = CancellableStatusDialog(text='Heat soak', parent=self)
+        self.soakStartNowButton = self.dialogs[self.Dialog.SOAK].addButton('Start now', QtWidgets.QMessageBox.AcceptRole)
+        self.soakStartNowButton.clicked.connect(self._soakStartNow)
+        self.dialogs[self.Dialog.SOAK].rejected.connect(self._soakCancelled)
+
     def __createTimers(self):
         self.temperatureJobPending = False
         self.temperatureTimer = QtCore.QTimer()
@@ -203,6 +243,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.noResponseTimer.setInterval(self.NO_RESPONSE_TIMEOUT_MS)
         self.noResponseTimer.timeout.connect(self._checkPrinterResponding)
 
+        self.soakTimer = QtCore.QTimer()
+        self.soakTimer.setInterval(1000)
+        self.soakTimer.timeout.connect(self._soakTick)
+
     def _createId(self, base):
         self.currentId += 1
         return f'{base}-{self.currentId}'
@@ -213,7 +257,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Create the printer and determine open arguments
         if self.printerConnectWidget.connectionMode() == ConnectionMode.MARLIN_2:
-            self.printer = Marlin2Printer(self.printerConnectWidget.printerInfo(), parent=self)
+            if self.printerConnectWidget.port() == PrinterConnectWidget.OCTOPRINT_PORT:
+                octoPrintSettings = loadOctoPrintSettings(self.settings)
+                if octoPrintSettings is None:
+                    self._warning('Enter your OctoPrint address and API key first (Ports -> OctoPrint settings).')
+                    self.editOctoPrintSettings()
+                    return
+                self.printer = Marlin2Printer(self.printerConnectWidget.printerInfo(), parent=self,
+                                             octoPrintSettings=octoPrintSettings)
+            else:
+                self.printer = Marlin2Printer(self.printerConnectWidget.printerInfo(), parent=self)
             kwargs = {'port': self.printerConnectWidget.port()}
         elif self.printerConnectWidget.connectionMode() == ConnectionMode.MOONRAKER:
             self.printer = MoonrakerPrinter(self.printerConnectWidget.printerInfo(), parent=self)
@@ -269,7 +322,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.temperatureJobPending = False
         self.temperatureTimer.stop()
         self.noResponseTimer.stop()
+        self.soakTimer.stop()
+        self.soakContext = None
         self.liveContext = None
+        self.lastTemperatures = None
+        self.bedAtTempSince = None
 
         if self.printer is None:
             self.updateState(self.State.DISCONNECTED)
@@ -313,7 +370,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.printerConnectWidget.setConnected()
 
         self.enumeratePortsAction.setEnabled(not connected)
-        self.autoDetectAction.setEnabled(not connected)
+        self.autoDetectAction.setEnabled(not connected and not self.octoPrintEnabled())
+        self.useOctoPrintAction.setEnabled(not connected)
 
         self.temperatureControlsWidget.setEnabled(connected and not busy)
         self.manualWidget.setEnabled(connected and not busy)
@@ -328,6 +386,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def updateTemperatures(self, id_, context, result):
         self.temperatureJobPending = False
+        self._trackBedTemperature(result)
         self.statusBar().setBedTemp(actual=result.bedActual, desired=result.bedDesired, power=result.bedPower)
         self.statusBar().setNozzleTemp(actual=result.toolActual, desired=result.toolDesired, power=result.toolPower)
 
@@ -506,6 +565,123 @@ class MainWindow(QtWidgets.QMainWindow):
                                                f'automatically. Press Done when it reads close to +0.000.')
         self._liveProbe()
 
+    # ----- Heat soak -----
+    def heatSoakMinutes(self):
+        try:
+            value = int(self.settings.value('heatSoakMinutes', 0))
+        except (TypeError, ValueError):
+            value = 0
+        return value if value in self.SOAK_CHOICES else 0
+
+    def _trackBedTemperature(self, result):
+        previous = self.lastTemperatures
+        self.lastTemperatures = result
+
+        if result.bedDesired <= 0:
+            self.bedAtTempSince = None
+            return
+
+        # A new target restarts the soak
+        if previous is not None and abs(previous.bedDesired - result.bedDesired) > 0.5:
+            self.bedAtTempSince = None
+
+        if abs(result.bedActual - result.bedDesired) <= self.SOAK_TOLERANCE_C:
+            if self.bedAtTempSince is None:
+                self.bedAtTempSince = time.monotonic()
+        elif result.bedActual < result.bedDesired - 2 * self.SOAK_TOLERANCE_C:
+            self.bedAtTempSince = None
+
+    def _withHeatSoak(self, action):
+        """ Runs action now, or after the bed has been at temperature for the heat soak time. """
+        minutes = self.heatSoakMinutes()
+        if minutes <= 0 or self.printer is None:
+            action()
+            return
+
+        temperatures = self.lastTemperatures
+        if temperatures is None or temperatures.bedDesired <= 0:
+            self.manualWidget.appendNote('Heat soak is on, but the bed heater is off, so probing started right away. '
+                                         'Turn the bed heater on to soak first.')
+            action()
+            return
+
+        self.soakContext = {'action': action, 'seconds': minutes * 60}
+        self.updateState(self.State.HEAT_SOAK)
+        self._soakTick()
+        if self.soakContext is not None:
+            self.dialogs[self.Dialog.SOAK].show()
+            self.soakTimer.start()
+
+    def _soakTick(self):
+        if self.soakContext is None:
+            self.soakTimer.stop()
+            return
+
+        temperatures = self.lastTemperatures
+        target = temperatures.bedDesired if temperatures is not None else 0
+        actual = temperatures.bedActual if temperatures is not None else 0
+
+        if self.bedAtTempSince is None:
+            self.dialogs[self.Dialog.SOAK].setText(f'Waiting for the bed to reach {target:.0f}\u00B0C '
+                                                   f'(now {actual:.1f}\u00B0C).\n\n'
+                                                   f'Then it will soak for {self.soakContext["seconds"] // 60} minutes '
+                                                   f'before probing.')
+            return
+
+        remaining = self.soakContext['seconds'] - (time.monotonic() - self.bedAtTempSince)
+        if remaining <= 0:
+            self._finishSoak()
+            return
+
+        minutes, seconds = divmod(int(remaining + 0.999), 60)
+        self.dialogs[self.Dialog.SOAK].setText(f'Bed is at {actual:.1f}\u00B0C. Letting it soak so the '
+                                               f'readings settle.\n\nProbing starts in {minutes}:{seconds:02d}.')
+
+    def _finishSoak(self):
+        context = self.soakContext
+        self.soakContext = None
+        self.soakTimer.stop()
+
+        dialog = self.dialogs[self.Dialog.SOAK]
+        dialog.blockSignals(True)
+        dialog.hide()
+        dialog.blockSignals(False)
+
+        if context is None or self.printer is None:
+            return
+        self.updateState(self.State.CONNECTED)
+        context['action']()
+
+    def _soakStartNow(self):
+        self._finishSoak()
+
+    def _soakCancelled(self):
+        if self.soakContext is None:
+            return # Already finished (e.g. "Start now")
+        self.soakContext = None
+        self.soakTimer.stop()
+        if self.printer is not None:
+            self.updateState(self.State.CONNECTED)
+
+    # ----- OctoPrint -----
+    def octoPrintEnabled(self):
+        value = self.settings.value('octoPrint/enabled', False)
+        return value in (True, 'true', '1', 1)
+
+    def setOctoPrintEnabled(self, enabled):
+        if enabled and loadOctoPrintSettings(self.settings) is None:
+            if not self.editOctoPrintSettings():
+                self.useOctoPrintAction.blockSignals(True)
+                self.useOctoPrintAction.setChecked(False)
+                self.useOctoPrintAction.blockSignals(False)
+                return
+        self.settings.setValue('octoPrint/enabled', bool(enabled))
+        self.printerConnectWidget.setOctoPrintMode(bool(enabled))
+        self.updateState()
+
+    def editOctoPrintSettings(self):
+        return OctoPrintSettingsDialog(self.settings, self).exec() == QtWidgets.QDialog.Accepted
+
     # ----- Sampling, history -----
     def samplesPerPoint(self):
         try:
@@ -579,6 +755,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         port = self.printerConnectWidget.port()
+        if port == PrinterConnectWidget.OCTOPRINT_PORT:
+            self._error(f'The printer has not responded through OctoPrint after {self.NO_RESPONSE_TIMEOUT_MS // 1000} seconds.\n\n'
+                        'Check that OctoPrint shows the printer as Operational and is not printing, and look at '
+                        'OctoPrint\'s Terminal tab for errors.')
+            return
         self._error(f'The printer has not responded on {port} after {self.NO_RESPONSE_TIMEOUT_MS // 1000} seconds.\n\n'
                     'Things to check:\n'
                     '- The right port is selected (try Ports -> Auto-detect printer)\n'
