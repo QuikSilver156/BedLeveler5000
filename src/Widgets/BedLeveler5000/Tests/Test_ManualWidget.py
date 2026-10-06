@@ -172,12 +172,12 @@ allTestPoints = [
                              '5': False,
                              '6': False},
                  expected = 'Probed H (215.0, 215.0): -0.022 (Fixed reference)'   \
-                            'Probed 1 ( 61.8,  17.1): -0.010 (Adjust: 00:01 CCW)' \
-                            'Probed 2 ( 61.8, 194.6):  0.033 (Adjust: 00:05 CCW)' \
-                            'Probed 3 ( 61.8, 372.1): -0.041 (Adjust: 00:02 CW)'  \
-                            'Probed 4 (416.8, 372.1): -0.062 (Adjust: 00:03 CW)'  \
-                            'Probed 5 (416.8, 194.6):  0.011 (Adjust: 00:03 CCW)' \
-                            'Probed 6 (416.8,  17.1): -0.016 (Adjust: 00:01 CCW)'),
+                            'Probed 1 ( 61.8,  17.1): -0.010 (Adjust: 1 min CCW)' \
+                            'Probed 2 ( 61.8, 194.6):  0.033 (Adjust: 5 min CCW)' \
+                            'Probed 3 ( 61.8, 372.1): -0.041 (Adjust: 2 min CW)'  \
+                            'Probed 4 (416.8, 372.1): -0.062 (Adjust: 3 min CW)'  \
+                            'Probed 5 (416.8, 194.6):  0.011 (Adjust: 3 min CCW)' \
+                            'Probed 6 (416.8,  17.1): -0.016 (Adjust: 1 min CCW)'),
     AllTestPoint(resultList = RESULT_LIST_1,
                  reference = 'H',
                  direction = 'Any',

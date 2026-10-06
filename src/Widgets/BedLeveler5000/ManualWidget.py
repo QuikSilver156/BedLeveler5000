@@ -399,10 +399,15 @@ class ManualWidget(QtWidgets.QWidget):
             value = f'{amount:7.4f}'
             units = f' rad'
         else:
-            hours = math.trunc(turns)
-            minutes = round(60 * (turns - hours))
-            amount = hours + minutes
-            value = f'{hours:02.0f}:{minutes:02.0f}'
+            # Clock face: full turns, plus minutes the minute hand would sweep (15 min = quarter turn)
+            fullTurns, minutes = divmod(round(60 * turns), 60)
+            amount = fullTurns + minutes
+            parts = []
+            if fullTurns:
+                parts.append(f'{fullTurns} turn{"s" if fullTurns > 1 else ""}')
+            if minutes or not fullTurns:
+                parts.append(f'{minutes} min')
+            value = ' + '.join(parts)
             units = ''
 
         if amount == 0:
