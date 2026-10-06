@@ -116,7 +116,8 @@ class OctoPrintCommandConnection(CommandConnection):
 
     def _resetStats(self):
         self.stats = {'socketMessages': 0, 'liveUpdates': 0, 'sendLines': 0, 'recvLines': 0,
-                      'oursSent': 0, 'oursPosted': 0, 'lastLogLines': deque(maxlen=12)}
+                      'oursSent': 0, 'oursPosted': 0, 'lastLogLines': deque(maxlen=12),
+                      'messageTypes': set()}
 
     def diagnostics(self):
         """ Plain-language summary of what has come back from OctoPrint so far. """
@@ -126,12 +127,13 @@ class OctoPrintCommandConnection(CommandConnection):
                     f'{self.settings.socketUrl()} opened but stayed silent - this usually means a proxy or '
                     'remote-access service (e.g. OctoEverywhere) is in between. Use OctoPrint\'s local address '
                     '(like http://octopi.local or its IP address) instead.')
+        types = ', '.join(sorted(s['messageTypes'])) or 'none'
         if s['liveUpdates'] == 0:
             return ('OctoPrint\'s push socket answered but sent no live updates, so it most likely rejected the '
-                    'login. Try generating a new Application Key in OctoPrint.')
+                    f'login. Try generating a new Application Key in OctoPrint. (Message types received: {types})')
         if s['sendLines'] == 0 and s['recvLines'] == 0:
-            return ('OctoPrint is sending live updates, but no terminal lines. Check that the printer is connected '
-                    'in OctoPrint and that its Terminal tab shows traffic.')
+            return (f'OctoPrint sent {s["liveUpdates"]} live updates, but none contained terminal lines. '
+                    f'(Message types received: {types})')
         if s['oursSent'] == 0:
             return (f'OctoPrint accepted {s["oursPosted"]} command(s), but none of them appeared in its terminal '
                     'log, so the replies could not be matched. Last lines seen:\n' + '\n'.join(s['lastLogLines']))
@@ -240,6 +242,9 @@ class OctoPrintCommandConnection(CommandConnection):
             message = json.loads(text)
         except ValueError:
             return
+        if isinstance(message, dict):
+            self.stats['messageTypes'].update(message.keys())
+            self.logger.debug(f'OctoPrint push message: {", ".join(message.keys())}')
 
         # Only live updates; 'history' holds log lines from before we connected
         current = message.get('current') if isinstance(message, dict) else None
