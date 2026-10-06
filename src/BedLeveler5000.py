@@ -143,18 +143,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # These stay visible (and updating) even while a status window is open.
         self.miniWebcam = WebcamWidget(self.settings, compact=True)
         self.miniTemperatureGraph = TemperatureGraphWidget(compact=True)
-        self.miniPanel = QtWidgets.QWidget()
-        miniLayout = QtWidgets.QHBoxLayout()
-        miniLayout.setContentsMargins(0, 6, 0, 0)
-        miniLayout.addWidget(self.miniTemperatureGraph, stretch=5)
-        miniLayout.addWidget(self.miniWebcam, stretch=4)
-        self.miniPanel.setLayout(miniLayout)
         self.miniPanelEnabled = self.settings.value('miniPanel/visible', True) in (True, 'true', '1', 1)
 
         temperatureRow = QtWidgets.QHBoxLayout()
         temperatureRow.setContentsMargins(0, 0, 0, 0)
+        # Camera on the left, temperature controls in the middle, graph on the right
+        temperatureRow.addWidget(self.miniWebcam, stretch=4)
         temperatureRow.addWidget(self.temperatureControlsWidget, stretch=0, alignment=QtCore.Qt.AlignTop)
-        temperatureRow.addWidget(self.miniPanel, stretch=1)
+        temperatureRow.addWidget(self.miniTemperatureGraph, stretch=5)
         temperatureRowWidget = QtWidgets.QWidget()
         temperatureRowWidget.setLayout(temperatureRow)
         self.temperatureRowWidget = temperatureRowWidget
@@ -947,12 +943,11 @@ class MainWindow(QtWidgets.QMainWindow):
         showWebcam = self.miniPanelEnabled and self.webcamDock.isHidden()
         self.miniTemperatureGraph.setVisible(showGraph)
         self.miniWebcam.setVisible(showWebcam)
-        self.miniPanel.setVisible(showGraph or showWebcam)
         self._fitTemperatureRow()
 
     def _fitTemperatureRow(self):
         """ Without the camera/graph, the temperature row shouldn't take extra height. """
-        if self.miniPanel.isHidden():
+        if self.miniWebcam.isHidden() and self.miniTemperatureGraph.isHidden():
             self.temperatureRowWidget.setMaximumHeight(self.temperatureRowWidget.minimumSizeHint().height())
         else:
             self.temperatureRowWidget.setMaximumHeight(16777215)
