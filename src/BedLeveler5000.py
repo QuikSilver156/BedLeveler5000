@@ -726,10 +726,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 connection.write('M140 S0')
             if 'nozzle' in heaters:
                 connection.write('M104 S0')
-            # Give the commands a moment to leave before the port closes
-            loop = QtCore.QEventLoop()
-            QtCore.QTimer.singleShot(800, loop.quit)
-            loop.exec()
+
+            if hasattr(connection, 'waitForPosts'):
+                # OctoPrint: wait until it has confirmed each command (retrying if needed)
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+                try:
+                    failed = connection.waitForPosts(8000)
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                if failed:
+                    QtWidgets.QMessageBox.warning(
+                        self, 'Heaters may still be on',
+                        'OctoPrint did not confirm that the heaters were turned off.\n\n'
+                        'Turn them off in OctoPrint (Temperature tab) or on the printer.')
+            else:
+                # USB: give the commands a moment to leave before the port closes
+                loop = QtCore.QEventLoop()
+                QtCore.QTimer.singleShot(800, loop.quit)
+                loop.exec()
         return True
 
     def _userDisconnect(self, *args):

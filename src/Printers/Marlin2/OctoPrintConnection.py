@@ -152,6 +152,7 @@ class OctoPrintCommandConnection(CommandConnection):
         self._replies = set()
         self._resetStats()
         self.busyReason = None
+        self.failedCommands = []
 
     def _resetStats(self):
         self.stats = {'socketMessages': 0, 'liveUpdates': 0, 'sendLines': 0, 'recvLines': 0,
@@ -246,32 +247,76 @@ class OctoPrintCommandConnection(CommandConnection):
             self.socket = None
         self.logger.info('Closed OctoPrint connection')
 
+    MAX_POST_ATTEMPTS = 3
+
+    # Errors where the request never reached OctoPrint, so sending it again is safe
+    RETRYABLE_ERRORS = (QtNetwork.QNetworkReply.RemoteHostClosedError,
+                        QtNetwork.QNetworkReply.ConnectionRefusedError,
+                        QtNetwork.QNetworkReply.TimeoutError,
+                        QtNetwork.QNetworkReply.TemporaryNetworkFailureError,
+                        QtNetwork.QNetworkReply.NetworkSessionFailedError,
+                        QtNetwork.QNetworkReply.UnknownNetworkError)
+
     def write(self, string):
         command = string.strip()
         self._oursPending.append(normalizeCommand(command))
         self.stats['oursPosted'] += 1
+        self._post(command, attempt=1)
 
+    def _post(self, command, attempt):
         qtRequest = QtNetwork.QNetworkRequest(QtCore.QUrl(self.settings.baseUrl() + '/api/printer/command'))
         qtRequest.setRawHeader(b'X-Api-Key', self.settings.apiKey.strip().encode())
         qtRequest.setHeader(QtNetwork.QNetworkRequest.ContentTypeHeader, 'application/json')
+        qtRequest.setTransferTimeout(10000)
         reply = self.networkAccessManager.post(qtRequest, QtCore.QByteArray(json.dumps({'commands': [command]}).encode()))
         self._replies.add(reply)
-        reply.finished.connect(lambda reply=reply, command=command: self._commandPosted(reply, command))
+        reply.finished.connect(lambda reply=reply, command=command, attempt=attempt:
+                               self._commandPosted(reply, command, attempt))
+
+    def waitForPosts(self, timeoutMs=5000):
+        """ Waits (running the event loop) until every posted command has an answer.
+            Returns the commands OctoPrint did not accept. """
+        self.failedCommands = []
+        timer = QtCore.QElapsedTimer()
+        timer.start()
+        while self._replies and timer.elapsed() < timeoutMs:
+            loop = QtCore.QEventLoop()
+            QtCore.QTimer.singleShot(50, loop.quit)
+            loop.exec()
+        unanswered = len(self._replies)
+        return self.failedCommands + (['(no answer)'] * unanswered)
 
     # ----- Internals -----
-    def _commandPosted(self, reply, command):
+    def _commandPosted(self, reply, command, attempt):
         self._replies.discard(reply)
         status = reply.attribute(QtNetwork.QNetworkRequest.HttpStatusCodeAttribute)
+        error = reply.error()
+        errorString = reply.errorString()
         reply.deleteLater()
-        if not self._isOpen:
+
+        if status in (200, 204) or not self._isOpen:
+            return # Done, or we've disconnected and no longer care
+
+        # 408: the web server in front of OctoPrint closed an idle connection just as this request
+        # arrived, so OctoPrint never saw it. Same for connection-level errors. Send it again.
+        if (status == 408 or (status is None and error in self.RETRYABLE_ERRORS)) and attempt < self.MAX_POST_ATTEMPTS:
+            self.logger.info(f'Retrying "{command}" (attempt {attempt + 1}) after {status or errorString}')
+            self._post(command, attempt + 1)
             return
-        if status not in (200, 204):
-            if status == 409:
-                message = 'OctoPrint refused the command because the printer is not operational or is printing.'
-            else:
-                message = f'OctoPrint did not accept "{command}" (HTTP {status}: {reply.errorString()}).'
-            self.logger.error(message)
-            self.connectionError.emit(message)
+
+        if status == 409:
+            message = 'OctoPrint refused the command because the printer is not operational or is printing.'
+        else:
+            message = f'OctoPrint did not accept "{command}" (HTTP {status}: {errorString}).'
+        self.logger.error(message)
+        if not hasattr(self, 'failedCommands'):
+            self.failedCommands = []
+        self.failedCommands.append(command)
+
+        # While shutting down (heaters-off), the caller reports failures itself
+        if not self._isOpen or self.ignoreReplies:
+            return
+        self.connectionError.emit(message)
 
     def _socketDisconnected(self):
         if self._isOpen:
