@@ -25,6 +25,7 @@ class ManualWidget(QtWidgets.QWidget):
 
     @enum.verify(enum.UNIQUE)
     class Output(enum.StrEnum):
+        PLAIN = 'Plain'
         NONE = 'None'
         DELTA = 'Delta'
         TIME = 'Time'
@@ -38,6 +39,7 @@ class ManualWidget(QtWidgets.QWidget):
         self.fixedMap = None
         self.lastResults = None
         self.lastReferenceName = None
+        self.lastInteriorNames = None
 
         self.__createWidgets()
         self.__layoutWidgets()
@@ -63,7 +65,8 @@ class ManualWidget(QtWidgets.QWidget):
         self.outputComboBox = QtWidgets.QComboBox()
         for output in self.Output:
             self.outputComboBox.addItem(str(output), output)
-        self.outputComboBox.setCurrentText(str(self.Output.TURNS))
+        self.outputComboBox.setCurrentText(str(self.Output.PLAIN))
+        self.outputComboBox.setToolTip('Plain: "leave it" or "turn N minutes CW/CCW" on a clock face')
 
         # Log
         self.log = QtWidgets.QTextEdit()
@@ -116,6 +119,7 @@ class ManualWidget(QtWidgets.QWidget):
         self.fixedMap = {}
         self.lastResults = None
         self.lastReferenceName = None
+        self.lastInteriorNames = None
 
         # Set reference combo box items
         defaultReference = None
@@ -126,7 +130,9 @@ class ManualWidget(QtWidgets.QWidget):
             if defaultReference is None and point.fixed:
                 defaultReference = point
         if defaultReference is None:
-            defaultReference = printerInfo.manualProbePoints[0]
+            interior = self.interiorPointNames(printerInfo.manualProbePoints)
+            knobs = [p for p in printerInfo.manualProbePoints if p.name not in interior]
+            defaultReference = knobs[0] if knobs else printerInfo.manualProbePoints[0]
         self.referenceComboBox.setCurrentText(defaultReference.name)
 
     def clear(self):
@@ -160,6 +166,10 @@ class ManualWidget(QtWidgets.QWidget):
         self.previousCommand = self.Command.SINGLE
 
     def _reportAllProbe(self, resultList):
+        if self.outputComboBox.currentData() == self.Output.PLAIN:
+            self._reportAllProbePlain(resultList)
+            return
+
         referenceName, relativeDistanceList = self._relativeDistances(resultList,
                                                                       self.referenceComboBox.currentText(),
                                                                       self.directionComboBox.currentData(),
@@ -193,10 +203,148 @@ class ManualWidget(QtWidgets.QWidget):
         if bowNote:
             self.appendNote(bowNote)
 
+    # ----- Plain instructions -----
+    LEAVE_IT_MM = 0.02   # Differences smaller than this aren't worth turning a knob for
+
+    @staticmethod
+    def interiorPointNames(points):
+        """ Names of points strictly inside the outline of the others. Those can't be bed supports
+            (e.g. a center check point), so they never get a knob instruction. """
+        coordinates = {p.name: (float(p.x), float(p.y)) for p in points}
+        if len(coordinates) < 4:
+            return set()
+
+        def cross(o, a, b):
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+        unique = sorted(set(coordinates.values()))
+        if len(unique) < 3:
+            return set()
+        lower, upper = [], []
+        for point in unique:
+            while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+                lower.pop()
+            lower.append(point)
+        for point in reversed(unique):
+            while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+                upper.pop()
+            upper.append(point)
+        hull = lower[:-1] + upper[:-1]
+        if len(hull) < 3:
+            return set()
+
+        def onBoundary(point):
+            for index in range(len(hull)):
+                a, b = hull[index], hull[(index + 1) % len(hull)]
+                length = math.hypot(b[0] - a[0], b[1] - a[1])
+                if length > 0 and abs(cross(a, b, point)) / length < 0.5:
+                    dot = (point[0] - a[0]) * (b[0] - a[0]) + (point[1] - a[1]) * (b[1] - a[1])
+                    if -0.5 <= dot / length <= length + 0.5:
+                        return True
+            return False
+
+        return {name for name, point in coordinates.items() if point not in hull and not onBoundary(point)}
+
+    def _plainReference(self, resultList, knobNames):
+        """ The knob everything else is adjusted to. Honors the Reference/Direction options, but never
+            picks a point without a knob. """
+        knobs = [p for p in resultList if p.name in knobNames]
+        if not knobs:
+            return None
+
+        # A fixed support (no knob) is the natural reference
+        for p in knobs:
+            if self.fixedMap.get(p.name):
+                return p
+
+        direction = self.directionComboBox.currentData()
+        if direction != self.Direction.ANY:
+            clockwiseScrew = self.printerInfo.screwType.clockwise
+            highest = (clockwiseScrew and direction == self.Direction.CW) or \
+                      (not clockwiseScrew and direction == self.Direction.CCW)
+            return max(knobs, key=lambda p: p.z) if highest else min(knobs, key=lambda p: p.z)
+
+        selected = self.referenceComboBox.currentText()
+        for p in knobs:
+            if p.name == selected:
+                return p
+
+        # Middle knob: the fewest total turns
+        return sorted(knobs, key=lambda p: p.z)[len(knobs) // 2]
+
+    def plainInstruction(self, relativeZ):
+        """ 'OK, leave it' or 'turn N min CW/CCW' for a knob that is relativeZ mm above the reference. """
+        if round(abs(relativeZ), 3) <= self.LEAVE_IT_MM:
+            return f'OK, leave it ({relativeZ:+.3f} mm)'
+
+        turns = abs(relativeZ) / self.printerInfo.screwType.pitch
+        minutes = round(turns * 60)
+        if minutes == 0:
+            return f'OK, leave it ({relativeZ:+.3f} mm)'
+
+        if self.printerInfo.screwType.clockwise:
+            direction = 'CCW' if relativeZ > 0 else 'CW'
+        else:
+            direction = 'CW' if relativeZ > 0 else 'CCW'
+
+        fullTurns, minutes = divmod(minutes, 60)
+        if fullTurns and minutes:
+            amount = f'{fullTurns} full turn{"s" if fullTurns > 1 else ""} + {minutes} min'
+        elif fullTurns:
+            amount = f'{fullTurns} full turn{"s" if fullTurns > 1 else ""}'
+        else:
+            amount = f'{minutes} min'
+        action = 'lower' if relativeZ > 0 else 'raise'
+        return f'Turn {amount} {direction} ({action} {abs(relativeZ):.3f} mm)'
+
+    def _reportAllProbePlain(self, resultList):
+        interior = self.interiorPointNames(resultList)
+        knobNames = {p.name for p in resultList if p.name not in interior}
+        reference = self._plainReference(resultList, knobNames)
+
+        if self.previousCommand is not None:
+            self.log.append('--------------------------------------------------')
+
+        if reference is None:
+            for p in resultList:
+                self.log.append(f'Probed {p.name} ({p.x:5.1f}, {p.y:5.1f}): {p.z:6.3f}')
+            self.previousCommand = self.Command.ALL
+            return
+
+        toTurn = 0
+        for p in resultList:
+            prefix = f'Probed {p.name} ({p.x:5.1f}, {p.y:5.1f}): {p.z:6.3f}  ->  '
+            relative = p.z - reference.z
+            if p.name == reference.name:
+                text = 'Reference, leave it'
+            elif p.name in interior:
+                shape = 'lower' if relative < 0 else 'higher'
+                text = f'No knob here: {abs(relative):.3f} mm {shape} than the reference (bed shape)'
+            elif self.fixedMap.get(p.name):
+                text = f'Fixed support ({relative:+.3f} mm)'
+            else:
+                text = self.plainInstruction(relative)
+                if text.startswith('Turn'):
+                    toTurn += 1
+            self.log.append(prefix + text)
+
+        self.log.append('Note: ' + ('All knobs are within ' f'{self.LEAVE_IT_MM:.2f} mm. The bed is level.'
+                                    if toTurn == 0 else
+                                    f'{toTurn} knob{"s" if toTurn > 1 else ""} to turn, measured against point '
+                                    f'{reference.name}. Minutes are on a clock face: 15 min = a quarter turn.'))
+        self.previousCommand = self.Command.ALL
+
+        # Remember this run for live adjust
+        self.lastResults = {p.name: p.z for p in resultList}
+        self.lastReferenceName = reference.name
+        self.lastInteriorNames = interior
+
     def adjustText(self, relativeZ):
         """ Returns the ' (Adjust: ...)' / ' (Delta: ...)' text for a height difference. """
         output = self.outputComboBox.currentData()
 
+        if output == self.Output.PLAIN:
+            return '  ->  ' + self.plainInstruction(relativeZ)
         if output == self.Output.NONE:
             return ''
         if output == self.Output.DELTA:
@@ -270,8 +418,10 @@ class ManualWidget(QtWidgets.QWidget):
                                               'Run "Probe all" first so there is a reference height to adjust toward.')
             return
 
+        interior = getattr(self, 'lastInteriorNames', None) or self.interiorPointNames(self.printerInfo.manualProbePoints)
         candidates = [p for p in self.printerInfo.manualProbePoints
-                      if p.name != self.lastReferenceName and not self.fixedMap.get(p.name, False)]
+                      if p.name != self.lastReferenceName and not self.fixedMap.get(p.name, False)
+                      and p.name not in interior]
         if not candidates:
             QtWidgets.QMessageBox.information(self, 'Live adjust', 'There are no adjustable points.')
             return
