@@ -449,31 +449,46 @@ class ManualWidget(QtWidgets.QWidget):
                 f'{abs(difference):.3f} mm {shape}. Turning the knobs can\'t fix a bow; '
                 f'leave them and let mesh bed leveling (G29) compensate.')
 
+    @staticmethod
+    def naturalKey(name):
+        """ Sorts point names as 1, 2, 3, ... 10, then letters. """
+        return (0, int(name), '') if str(name).isdigit() else (1, 0, str(name))
+
+    def liveCandidates(self):
+        """ Points Live adjust can work on, in natural order (1, 2, 3, ...). """
+        if self.printerInfo is None or self.lastReferenceName is None:
+            return []
+        interior = getattr(self, 'lastInteriorNames', None) or self.interiorPointNames(self.printerInfo.manualProbePoints)
+        candidates = [p for p in self.printerInfo.manualProbePoints
+                      if p.name != self.lastReferenceName and not self.fixedMap.get(p.name, False)
+                      and p.name not in interior]
+        candidates.sort(key=lambda p: self.naturalKey(p.name))
+        return [NamedPoint2F(p.name, p.x, p.y) for p in candidates]
+
     def _startLiveAdjust(self):
         if not self.lastResults or self.lastReferenceName is None:
             QtWidgets.QMessageBox.information(self, 'Live adjust',
                                               'Run "Probe all" first so there is a reference height to adjust toward.')
             return
 
-        interior = getattr(self, 'lastInteriorNames', None) or self.interiorPointNames(self.printerInfo.manualProbePoints)
-        candidates = [p for p in self.printerInfo.manualProbePoints
-                      if p.name != self.lastReferenceName and not self.fixedMap.get(p.name, False)
-                      and p.name not in interior]
+        candidates = self.liveCandidates()
         if not candidates:
             QtWidgets.QMessageBox.information(self, 'Live adjust', 'There are no adjustable points.')
             return
 
-        # Default to the point that is furthest off
-        candidates.sort(key=lambda p: -abs(self.lastResults.get(p.name, 0.0) - self.lastResults[self.lastReferenceName]))
+        # Listed 1, 2, 3, ...; the point that is furthest off is preselected
+        reference = self.lastResults[self.lastReferenceName]
+        worst = max(range(len(candidates)),
+                    key=lambda i: abs(self.lastResults.get(candidates[i].name, reference) - reference))
         names = [p.name for p in candidates]
         name, ok = QtWidgets.QInputDialog.getItem(self, 'Live adjust',
                                                   f'Point to adjust (reference: {self.lastReferenceName}):',
-                                                  names, 0, False)
+                                                  names, worst, False)
         if not ok:
             return
 
         point = next(p for p in candidates if p.name == name)
-        self.liveAdjust.emit(NamedPoint2F(point.name, point.x, point.y),
+        self.liveAdjust.emit(point,
                              self.lastReferenceName,
                              float(self.lastResults[self.lastReferenceName]))
 
