@@ -202,10 +202,29 @@ class ManualWidget(QtWidgets.QWidget):
             self._reportAllProbePlain(resultList)
             return
 
-        referenceName, relativeDistanceList = self._relativeDistances(resultList,
-                                                                      self.referenceComboBox.currentText(),
-                                                                      self.directionComboBox.currentData(),
-                                                                      self.printerInfo.screwType.clockwise)
+        # Points inside the outline of the others (e.g. a center check point) have no knob, so they
+        # are never used as the reference or given an adjustment. Fixed supports are left alone.
+        noKnob = {name for name in self.interiorPointNames(resultList) if not self.fixedMap.get(name)}
+        knobList = [p for p in resultList if p.name not in noKnob]
+        selectedReference = self.referenceComboBox.currentText()
+        substitutedFrom = None
+        if noKnob and knobList:
+            referenceForCalc = selectedReference
+            if self.directionComboBox.currentData() == self.Direction.ANY and selectedReference in noKnob:
+                referenceForCalc = self._plainReference(resultList, {p.name for p in knobList}).name
+                substitutedFrom = selectedReference
+            referenceName, knobRelatives = self._relativeDistances(knobList, referenceForCalc,
+                                                                   self.directionComboBox.currentData(),
+                                                                   self.printerInfo.screwType.clockwise)
+            referenceZ = next(p.z for p in resultList if p.name == referenceName)
+            relativeByName = {r.name: r for r in knobRelatives}
+            relativeDistanceList = [relativeByName.get(p.name) or NamedPoint3F(p.name, p.x, p.y, p.z - referenceZ)
+                                    for p in resultList]
+        else:
+            referenceName, relativeDistanceList = self._relativeDistances(resultList,
+                                                                          selectedReference,
+                                                                          self.directionComboBox.currentData(),
+                                                                          self.printerInfo.screwType.clockwise)
 
         if self.previousCommand is not None:
             self.log.append('--------------------------------------------------')
@@ -216,8 +235,11 @@ class ManualWidget(QtWidgets.QWidget):
 
             if self.outputComboBox.currentData() == self.Output.NONE:
                 suffix = ''
+            elif raw.name in noKnob:
+                shape = 'lower' if relative.z < 0 else 'higher'
+                suffix = f' (No knob: {abs(relative.z):.3f} mm {shape} than {referenceName}, bed shape)'
             elif raw.name == referenceName:
-                suffix = ' (Fixed reference)'
+                suffix = ' (Fixed reference)' if self.fixedMap.get(raw.name) else ' (Reference)'
             elif self.fixedMap[raw.name]:
                 suffix = ''
             else:
@@ -226,9 +248,14 @@ class ManualWidget(QtWidgets.QWidget):
             self.log.append(prefix + suffix)
         self.previousCommand = self.Command.ALL
 
+        if substitutedFrom is not None:
+            self.appendNote(f'Reference {substitutedFrom} has no knob, so adjustments are measured against '
+                            f'point {referenceName} instead.')
+
         # Remember this run for live adjust
         self.lastResults = {p.name: p.z for p in resultList}
         self.lastReferenceName = referenceName
+        self.lastInteriorNames = noKnob
 
         # Warn when the corners agree but the middle does not (a bowed bed)
         bowNote = self.bowWarning(resultList)
