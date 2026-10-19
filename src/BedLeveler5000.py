@@ -14,6 +14,7 @@ from Widgets.BedLeveler5000.WebcamWidget import WebcamWidget
 from Widgets.BedLeveler5000.TemperatureGraphWidget import TemperatureGraphWidget
 from Widgets.PrinterConnectWidget import PrinterConnectWidget
 from Dialogs.BedLeveler5000.CancellableStatusDialog import CancellableStatusDialog
+from Dialogs.BedLeveler5000.LiveAdjustDialog import LiveAdjustDialog
 from Dialogs.AboutDialog import AboutDialog
 from Dialogs.WarningDialog import WarningDialog
 from Dialogs.ErrorDialog import ErrorDialog
@@ -312,10 +313,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dialogs[self.Dialog.HOMING].rejected.connect(self._cancel)
         self.dialogs[self.Dialog.PROBE].rejected.connect(self._cancel)
 
-        self.dialogs[self.Dialog.LIVE] = CancellableStatusDialog(text='Live adjust', parent=self)
-        self.dialogs[self.Dialog.LIVE].setStandardButtons(QtWidgets.QMessageBox.Cancel)
-        self.dialogs[self.Dialog.LIVE].button(QtWidgets.QMessageBox.Cancel).setText('Done')
+        self.dialogs[self.Dialog.LIVE] = LiveAdjustDialog(parent=self)
         self.dialogs[self.Dialog.LIVE].rejected.connect(self._cancel)
+        self.dialogs[self.Dialog.LIVE].nextRequested.connect(self._liveNextPoint)
+        self.liveNextButton = self.dialogs[self.Dialog.LIVE].nextButton
 
         self.dialogs[self.Dialog.SOAK] = CancellableStatusDialog(text='Heat soak', parent=self)
         self.soakStartNowButton = self.dialogs[self.Dialog.SOAK].addButton('Start now', QtWidgets.QMessageBox.AcceptRole)
@@ -648,17 +649,36 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.updateMesh(row, column)
 
     # ----- Live adjust -----
-    def startLiveAdjust(self, point, referenceName, referenceZ):
+    def startLiveAdjust(self, point, referenceName, referenceZ, *, alreadyShown=False):
         self.liveContext = {'type': self.State.LIVE_ADJUST,
                             'point': point,
                             'referenceName': referenceName,
                             'referenceZ': referenceZ,
                             'count': 0,
-                            'lastText': None}
+                            'lastText': None,
+                            'nextPoint': None}
         self.updateState(self.State.LIVE_ADJUST)
+        self.liveNextButton.setVisible(len(self.manualWidget.liveCandidates()) > 1)
+        self.liveNextButton.setEnabled(True)
         self.dialogs[self.Dialog.LIVE].setText(f'Live adjust: point {point.name}\n\nTaking the first reading...')
-        self.dialogs[self.Dialog.LIVE].show()
+        if not alreadyShown:
+            self.dialogs[self.Dialog.LIVE].show()
         self._liveProbe()
+
+    def _liveNextPoint(self):
+        """ Moves Live adjust to the next point (1, 2, 3, ... wrapping) once the current reading finishes. """
+        context = self.liveContext
+        if context is None or self.state != self.State.LIVE_ADJUST:
+            return
+        candidates = self.manualWidget.liveCandidates()
+        names = [p.name for p in candidates]
+        if len(candidates) < 2:
+            return
+        current = names.index(context['point'].name) if context['point'].name in names else -1
+        context['nextPoint'] = candidates[(current + 1) % len(candidates)]
+        self.liveNextButton.setEnabled(False)
+        self.dialogs[self.Dialog.LIVE].setText(f'Live adjust: finishing the reading at point {context["point"].name}, '
+                                               f'then moving to point {context["nextPoint"].name}...')
 
     def _liveProbe(self):
         point = self.liveContext['point']
@@ -672,6 +692,13 @@ class MainWindow(QtWidgets.QMainWindow):
         point = context['point']
         text = self.manualWidget.liveReadingText(point.name, response.z, context['referenceName'], context['referenceZ'])
         context['lastText'] = text
+
+        if context.get('nextPoint') is not None:
+            # Log where this point ended up, then carry on with the next one
+            self.manualWidget.logLiveReading(text)
+            self.startLiveAdjust(context['nextPoint'], context['referenceName'], context['referenceZ'],
+                                 alreadyShown=True)
+            return
         self.dialogs[self.Dialog.LIVE].setText(f'Live adjust: point {point.name} (reading {context["count"]})\n\n'
                                                f'{text}\n\n'
                                                f'Turn the knob for point {point.name} now. The next reading starts '
