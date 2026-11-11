@@ -497,10 +497,13 @@ class ManualWidget(QtWidgets.QWidget):
         return pointName in self._knobNames()
 
     def liveCandidates(self):
-        """ Every probe point, in natural order (1, 2, 3, ...). """
+        """ Every point with a knob (the reference included), in natural order (1, 2, 3, ...).
+            Points that can't be adjusted (no knob, like a center point, or fixed supports) are left out. """
         if self.printerInfo is None or self.lastReferenceName is None:
             return []
-        points = sorted(self.printerInfo.manualProbePoints, key=lambda p: self.naturalKey(p.name))
+        knobs = self._knobNames()
+        points = sorted((p for p in self.printerInfo.manualProbePoints if p.name in knobs),
+                        key=lambda p: self.naturalKey(p.name))
         return [NamedPoint2F(p.name, p.x, p.y) for p in points]
 
     def liveReferenceFor(self, pointName):
