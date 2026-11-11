@@ -481,16 +481,42 @@ class ManualWidget(QtWidgets.QWidget):
         """ Sorts point names as 1, 2, 3, ... 10, then letters. """
         return (0, int(name), '') if str(name).isdigit() else (1, 0, str(name))
 
+    def _noKnobNames(self):
+        interior = getattr(self, 'lastInteriorNames', None)
+        if interior is None:
+            interior = self.interiorPointNames(self.printerInfo.manualProbePoints)
+        return {name for name in interior if not self.fixedMap.get(name)}
+
+    def _knobNames(self):
+        """ Points with a knob: not fixed and not inside the outline of the others. """
+        noKnob = self._noKnobNames()
+        return {p.name for p in self.printerInfo.manualProbePoints
+                if p.name not in noKnob and not self.fixedMap.get(p.name, False)}
+
+    def hasKnob(self, pointName):
+        return pointName in self._knobNames()
+
     def liveCandidates(self):
-        """ Points Live adjust can work on, in natural order (1, 2, 3, ...). """
+        """ Every probe point, in natural order (1, 2, 3, ...). """
         if self.printerInfo is None or self.lastReferenceName is None:
             return []
-        interior = getattr(self, 'lastInteriorNames', None) or self.interiorPointNames(self.printerInfo.manualProbePoints)
-        candidates = [p for p in self.printerInfo.manualProbePoints
-                      if p.name != self.lastReferenceName and not self.fixedMap.get(p.name, False)
-                      and p.name not in interior]
-        candidates.sort(key=lambda p: self.naturalKey(p.name))
-        return [NamedPoint2F(p.name, p.x, p.y) for p in candidates]
+        points = sorted(self.printerInfo.manualProbePoints, key=lambda p: self.naturalKey(p.name))
+        return [NamedPoint2F(p.name, p.x, p.y) for p in points]
+
+    def liveReferenceFor(self, pointName):
+        """ (reference name, reference z from the last Probe all) to measure pointName against.
+            Normally the run's reference; for the reference point itself, the knob or fixed support
+            whose height is closest to the middle of the rest. """
+        if pointName != self.lastReferenceName:
+            return self.lastReferenceName, float(self.lastResults[self.lastReferenceName])
+
+        noKnob = self._noKnobNames()
+        others = [name for name in self.lastResults if name != pointName and name not in noKnob]
+        if not others:
+            return self.lastReferenceName, float(self.lastResults[self.lastReferenceName])
+        others.sort(key=lambda name: self.lastResults[name])
+        name = others[len(others) // 2]
+        return name, float(self.lastResults[name])
 
     def _startLiveAdjust(self):
         if not self.lastResults or self.lastReferenceName is None:
@@ -503,10 +529,12 @@ class ManualWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, 'Live adjust', 'There are no adjustable points.')
             return
 
-        # Listed 1, 2, 3, ...; the point that is furthest off is preselected
+        # Listed 1, 2, 3, ...; the knob that is furthest off is preselected
         reference = self.lastResults[self.lastReferenceName]
+        knobs = self._knobNames() - {self.lastReferenceName}
         worst = max(range(len(candidates)),
-                    key=lambda i: abs(self.lastResults.get(candidates[i].name, reference) - reference))
+                    key=lambda i: (candidates[i].name in knobs,
+                                   abs(self.lastResults.get(candidates[i].name, reference) - reference)))
         names = [p.name for p in candidates]
         name, ok = QtWidgets.QInputDialog.getItem(self, 'Live adjust',
                                                   f'Point to adjust (reference: {self.lastReferenceName}):',
@@ -515,13 +543,18 @@ class ManualWidget(QtWidgets.QWidget):
             return
 
         point = next(p for p in candidates if p.name == name)
-        self.liveAdjust.emit(point,
-                             self.lastReferenceName,
-                             float(self.lastResults[self.lastReferenceName]))
+        referenceName, referenceZ = self.liveReferenceFor(point.name)
+        self.liveAdjust.emit(point, referenceName, referenceZ)
 
     def liveReadingText(self, name, z, referenceName, referenceZ):
         relative = z - referenceZ
-        return f'{name}: {z:6.3f} mm, {relative:+.3f} vs {referenceName}{self.adjustText(relative)}'
+        text = f'{name}: {z:6.3f} mm, {relative:+.3f} vs {referenceName}'
+        if name in self._noKnobNames():
+            shape = 'lower' if relative < 0 else 'higher'
+            return f'{text}  ->  No knob here: {abs(relative):.3f} mm {shape} than {referenceName} (bed shape)'
+        if self.fixedMap.get(name, False):
+            return f'{text}  ->  Fixed support, no knob'
+        return text + self.adjustText(relative)
 
     def logLiveReading(self, text):
         if self.previousCommand is not None:

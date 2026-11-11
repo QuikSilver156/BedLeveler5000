@@ -654,8 +654,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def startLiveAdjust(self, point, referenceName, referenceZ, *, alreadyShown=False):
         # On a fresh start, re-measure the reference point first: the height from the last "Probe all"
         # may be stale (Z offset changed, re-homed, knob turned), which would give a wrong target.
+        previous = self.liveContext if alreadyShown else None
         referencePoint = None
-        if not alreadyShown:
+        if previous is None or previous.get('referenceName') != referenceName:
             referencePoint = next((p for p in self.manualWidget.printerInfo.manualProbePoints
                                    if p.name == referenceName), None)
 
@@ -680,6 +681,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not alreadyShown:
             self.dialogs[self.Dialog.LIVE].show()
         self._liveProbe()
+
+    def _liveReferenceFor(self, pointName, context):
+        """ Reference for the next point: keep the freshly measured one when it is unchanged. """
+        referenceName, referenceZ = self.manualWidget.liveReferenceFor(pointName)
+        if context is not None and referenceName == context['referenceName']:
+            return referenceName, context['referenceZ']
+        return referenceName, referenceZ
 
     def _liveNextPoint(self):
         """ Moves Live adjust to the next point (1, 2, 3, ... wrapping) once the current reading finishes. """
@@ -728,14 +736,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if context.get('nextPoint') is not None:
             # Log where this point ended up, then carry on with the next one
             self.manualWidget.logLiveReading(text)
-            self.startLiveAdjust(context['nextPoint'], context['referenceName'], context['referenceZ'],
-                                 alreadyShown=True)
+            nextPoint = context['nextPoint']
+            referenceName, referenceZ = self._liveReferenceFor(nextPoint.name, context)
+            self.startLiveAdjust(nextPoint, referenceName, referenceZ, alreadyShown=True)
             return
         self.dialogs[self.Dialog.LIVE].setText(f'Live adjust: point {point.name} (reading {context["count"]})\n\n'
                                                f'{context["referenceNote"]}{warning}'
                                                f'{text}\n\n'
-                                               f'Turn the knob for point {point.name} now. The next reading starts '
-                                               f'automatically. Press Done when it reads close to +0.000.')
+                                               + (f'Turn the knob for point {point.name} now. The next reading starts '
+                                                  f'automatically. Press Done when it reads close to +0.000.'
+                                                  if self.manualWidget.hasKnob(point.name) else
+                                                  f'Point {point.name} has no knob, so this is just for checking. '
+                                                  f'Readings keep updating; press Next point or Done.'))
         self._liveProbe()
 
     # ----- Fail-safes -----
