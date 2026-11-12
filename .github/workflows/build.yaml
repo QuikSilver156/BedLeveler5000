@@ -133,6 +133,10 @@ jobs:
 
   build-macos-m1:
     name: MacOS_M1
+    # GitHub often has no macOS Apple-silicon runner free on this account ("job was not acquired ...
+    # capacity constraints"), which failed every build. Off unless the repository variable
+    # BUILD_MACOS_M1 is set to 'true' (Settings -> Secrets and variables -> Actions -> Variables).
+    if: ${{ vars.BUILD_MACOS_M1 == 'true' }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
