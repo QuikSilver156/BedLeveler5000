@@ -20,7 +20,10 @@ class LiveAdjustDialog(QtWidgets.QDialog):
 
         self.textLabel = QtWidgets.QLabel()
         self.textLabel.setWordWrap(True)
-        self.textLabel.setMinimumWidth(420)
+        # A fixed width lets the label work out exactly how tall its wrapped text is
+        self.textLabel.setFixedWidth(560)
+        self.textLabel.setTextFormat(QtCore.Qt.PlainText)
+        self.textLabel.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         font = self.textLabel.font()
         font.setPointSizeF(font.pointSizeF() * 1.15)
         self.textLabel.setFont(font)
@@ -44,7 +47,11 @@ class LiveAdjustDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout()
         layout.addLayout(top)
         layout.addLayout(buttons)
+        # Grow and shrink with the text so nothing is cut off
+        layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
         self.setLayout(layout)
 
     def setText(self, text):
         self.textLabel.setText(text)
+        self.textLabel.setMinimumHeight(self.textLabel.heightForWidth(self.textLabel.width()))
+        self.adjustSize()

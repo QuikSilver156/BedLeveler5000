@@ -133,7 +133,7 @@ jobs:
 
   build-macos-m1:
     name: MacOS_M1
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
         with:

@@ -18,6 +18,9 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     needs: Build
+    # Release with whatever platforms built (e.g. if GitHub has no macOS runner free), as long as
+    # the Windows build is there; the Create assets step checks that.
+    if: ${{ !cancelled() }}
     environment: Deployment
     env:
       TAG: ${{ github.ref_name }}
@@ -32,22 +35,30 @@ jobs:
       - uses: actions/download-artifact@v7
       - name: Create assets
         run: |
+          if [ ! -d Artifacts-Windows ]; then
+            echo "::error::The Windows build is missing, so no release is created."
+            exit 1
+          fi
+          ASSETS=""
           mv Artifacts-Windows ${WINDOWS_STEM}
           7z a ${WINDOWS_STEM}.7z ${WINDOWS_STEM}
-          mv Artifacts-Linux ${LINUX_STEM}
-          tar zcvf ${LINUX_STEM}.tgz ${LINUX_STEM}
-          mv Artifacts-MacOS-Intel ${MACOS_INTEL_STEM}
-          tar zcvf ${MACOS_INTEL_STEM}.tgz ${MACOS_INTEL_STEM}
-          mv Artifacts-MacOS-M1 ${MACOS_M1_STEM}
-          tar zcvf ${MACOS_M1_STEM}.tgz ${MACOS_M1_STEM}
+          ASSETS="${WINDOWS_STEM}.7z"
+          package() {  # artifact folder, stem
+            if [ -d "$1" ]; then
+              mv "$1" "$2"
+              tar zcvf "$2.tgz" "$2"
+              ASSETS="$ASSETS $2.tgz"
+            else
+              echo "::warning::$1 is missing (that build failed or never ran); releasing without it."
+            fi
+          }
+          package Artifacts-Linux ${LINUX_STEM}
+          package Artifacts-MacOS-Intel ${MACOS_INTEL_STEM}
+          package Artifacts-MacOS-M1 ${MACOS_M1_STEM}
+          echo "ASSETS=$ASSETS" >> "$GITHUB_ENV"
       - name: Create hashes file
         run: |
-          sha256sum --binary \
-              ${WINDOWS_STEM}.7z \
-              ${LINUX_STEM}.tgz \
-              ${MACOS_INTEL_STEM}.tgz \
-              ${MACOS_M1_STEM}.tgz \
-              > ${HASHES_FILE}
+          sha256sum --binary ${ASSETS} > ${HASHES_FILE}
           cat ${HASHES_FILE}
       - name: Sign hashes file
         if: ${{ env.HAS_GPG_KEY == 'true' }}
@@ -75,9 +86,6 @@ jobs:
               --title="${TAG}-QS (community build)" \
               --verify-tag \
               --generate-notes \
-              ${WINDOWS_STEM}.7z \
-              ${LINUX_STEM}.tgz \
-              ${MACOS_INTEL_STEM}.tgz \
-              ${MACOS_M1_STEM}.tgz \
+              ${ASSETS} \
               ${HASHES_FILE} \
               ${SIGNATURE}
