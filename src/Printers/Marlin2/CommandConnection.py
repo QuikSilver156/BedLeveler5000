@@ -5,6 +5,7 @@ from Dialogs.FatalErrorDialog import FatalErrorDialog
 from .Commands.CommandBase import CommandBase
 from .Commands.CommandG0 import CommandG0
 from .Commands.CommandG28 import CommandG28
+from .Commands.CommandG29 import CommandG29
 from .Commands.CommandG30 import CommandG30
 from .Commands.CommandG42 import CommandG42
 from .Commands.CommandG90 import CommandG90
@@ -14,10 +15,12 @@ from .Commands.CommandM105 import CommandM105
 from .Commands.CommandM114 import CommandM114
 from .Commands.CommandM118 import CommandM118
 from .Commands.CommandM140 import CommandM140
+from .Commands.CommandM190 import CommandM190
 from .Commands.CommandM211 import CommandM211
 from .Commands.CommandM27 import CommandM27
 from .Commands.CommandM400 import CommandM400
 from .Commands.CommandM420 import CommandM420
+from .Commands.CommandM500 import CommandM500
 from .Commands.CommandM851 import CommandM851
 from .SerialConnection import SerialConnection
 from PySide6 import QtCore
@@ -28,6 +31,7 @@ class CommandConnection(SerialConnection):
     finished = QtCore.Signal(CommandBase)
     finishedG0 = QtCore.Signal(CommandG0)
     finishedG28 = QtCore.Signal(CommandG28)
+    finishedG29 = QtCore.Signal(CommandG29)
     finishedG30 = QtCore.Signal(CommandG30)
     finishedG42 = QtCore.Signal(CommandG42)
     finishedG90 = QtCore.Signal(CommandG90)
@@ -37,10 +41,12 @@ class CommandConnection(SerialConnection):
     finishedM114 = QtCore.Signal(CommandM114)
     finishedM118 = QtCore.Signal(CommandM118)
     finishedM140 = QtCore.Signal(CommandM140)
+    finishedM190 = QtCore.Signal(CommandM190)
     finishedM211 = QtCore.Signal(CommandM211)
     finishedM27 = QtCore.Signal(CommandM27)
     finishedM400 = QtCore.Signal(CommandM400)
     finishedM420 = QtCore.Signal(CommandM420)
+    finishedM500 = QtCore.Signal(CommandM500)
     finishedM851 = QtCore.Signal(CommandM851)
 
     def __init__(self, *args, **kwargs):
@@ -123,6 +129,15 @@ class CommandConnection(SerialConnection):
 
     def sendM211(self, *args, **kwargs):
         return self._createCommand(CommandM211, *args, **kwargs)
+
+    def sendG29(self, *args, **kwargs):
+        return self._createCommand(CommandG29, *args, **kwargs)
+
+    def sendM190(self, *args, **kwargs):
+        return self._createCommand(CommandM190, *args, **kwargs)
+
+    def sendM500(self, *args, **kwargs):
+        return self._createCommand(CommandM500, *args, **kwargs)
 
     def sendM27(self, *args, **kwargs):
         return self._createCommand(CommandM27, *args, **kwargs)
