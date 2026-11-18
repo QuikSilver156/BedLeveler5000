@@ -56,6 +56,7 @@ class MainWindow(QtWidgets.QMainWindow):
         LIVE_ADJUST = 'Live adjust'
         HEAT_SOAK = 'Heat soaking bed'
         SAFETY_CHECK = 'Checking the printer is idle'
+        CREATING_MESH = 'Creating bed mesh'
 
     NO_RESPONSE_TIMEOUT_MS = 10_000
     OCTOPRINT_NO_RESPONSE_TIMEOUT_MS = 45_000
@@ -70,6 +71,7 @@ class MainWindow(QtWidgets.QMainWindow):
         PROBE = 'Probe'
         LIVE = 'Live'
         SOAK = 'Soak'
+        CREATE_MESH = 'Create mesh'
 
     def __init__(self, *args, printersDir, printer=None, host=None, port=None, noTemperatureReporting=False, **kwargs):
         super().__init__(*args, **kwargs)
@@ -81,6 +83,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.liveContext = None
         self.soakContext = None
         self.safetyContext = None
+        self.meshCreation = None
+        self.meshCreationOffered = False
         self.heatersSetByApp = {'bed': False, 'nozzle': False}
         self.lastTemperatures = None
         self.bedAtTempSince = None
@@ -318,6 +322,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dialogs[self.Dialog.LIVE].nextRequested.connect(self._liveNextPoint)
         self.liveNextButton = self.dialogs[self.Dialog.LIVE].nextButton
 
+        self.dialogs[self.Dialog.CREATE_MESH] = CancellableStatusDialog(text='Creating bed mesh', parent=self)
+        self.dialogs[self.Dialog.CREATE_MESH].rejected.connect(self._cancelMeshCreation)
+
         self.dialogs[self.Dialog.SOAK] = CancellableStatusDialog(text='Heat soak', parent=self)
         self.soakStartNowButton = self.dialogs[self.Dialog.SOAK].addButton('Start now', QtWidgets.QMessageBox.AcceptRole)
         self.soakStartNowButton.clicked.connect(self._soakStartNow)
@@ -435,6 +442,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.soakContext = None
         self.safetyTimer.stop()
         self.safetyContext = None
+        self.meshCreation = None
+        self.meshCreationOffered = False
         self.heatersSetByApp = {'bed': False, 'nozzle': False}
         self.liveContext = None
         self.lastTemperatures = None
@@ -740,11 +749,16 @@ class MainWindow(QtWidgets.QMainWindow):
             referenceName, referenceZ = self._liveReferenceFor(nextPoint.name, context)
             self.startLiveAdjust(nextPoint, referenceName, referenceZ, alreadyShown=True)
             return
+        # In the dialog: distance from the goal on its own line, then what to do, then the raw numbers
+        dialogText = text.replace('  ->  ', '\n').replace('   [', '\n[')
         self.dialogs[self.Dialog.LIVE].setText(f'Live adjust: point {point.name} (reading {context["count"]})\n\n'
                                                f'{context["referenceNote"]}{warning}'
-                                               f'{text}\n\n'
-                                               + (f'Turn the knob for point {point.name} now. The next reading starts '
-                                                  f'automatically. Press Done when it reads close to +0.000.'
+                                               f'{dialogText}\n\n'
+                                               + ((f'Point {point.name} is at the goal. Press Next point or Done (readings keep updating).'
+                                                   if self.manualWidget.atGoal(relative) else
+                                                   f'Turn the knob for point {point.name} toward 0.000. The next reading '
+                                                   f'starts automatically. A \u2713 means it is close enough '
+                                                   f'(within \u00B1{self.manualWidget.LEAVE_IT_MM:.2f} mm).')
                                                   if self.manualWidget.hasKnob(point.name) else
                                                   f'Point {point.name} has no knob, so this is just for checking. '
                                                   f'Readings keep updating; press Next point or Done.'))
@@ -1156,7 +1170,91 @@ class MainWindow(QtWidgets.QMainWindow):
         self.updateState(self.State.CONNECTED)
 
     def reportPrinterError(self, type_, id_, context, message):
+        if 'No mesh found' in message and isinstance(self.printer, Marlin2Printer) and not self.meshCreationOffered:
+            self.meshCreationOffered = True
+            self._offerMeshCreation(message)
+            return
         self._error(message)
+
+    # ----- Create a mesh when the printer has none (e.g. after a firmware flash) -----
+    def _offerMeshCreation(self, originalMessage):
+        initializing = self.dialogs[self.Dialog.INITIALIZING]
+        initializing.blockSignals(True)
+        initializing.hide()
+        initializing.blockSignals(False)
+
+        defaultTemp = int(self.temperatureControlsWidget.bedTempSpinBox.value()) or 50
+        temperature, ok = QtWidgets.QInputDialog.getInt(
+            self, 'No bed mesh on the printer',
+            'The printer has no saved bed mesh, so Bed Leveler 5000 can\'t finish connecting.\n'
+            'This is normal after flashing firmware or resetting settings.\n\n'
+            'Create one now? Bed Leveler 5000 will heat the bed, home, probe the whole bed\n'
+            '(G29, a few minutes) and save the mesh (M500), then finish connecting.\n\n'
+            'Bed temperature for the mesh (\u00B0C, 0 = don\'t heat):',
+            defaultTemp, 0, 120, 5)
+        if not ok:
+            self._error(originalMessage)
+            return
+
+        steps = []
+        if temperature > 0:
+            steps.append((f'Heating the bed to {temperature}\u00B0C and waiting for it...',
+                          lambda connection: connection.sendM190(s=temperature)))
+            self.heatersSetByApp['bed'] = True
+        steps.append(('Homing...', lambda connection: connection.sendG28()))
+        steps.append(('Probing the whole bed (G29). This takes a few minutes...',
+                      lambda connection: connection.sendG29()))
+        steps.append(('Saving the mesh to the printer (M500)...', lambda connection: connection.sendM500()))
+
+        self.meshCreation = {'steps': steps, 'index': 0}
+        self.updateState(self.State.CREATING_MESH)
+        self.noResponseTimer.stop()
+        self.dialogs[self.Dialog.CREATE_MESH].show()
+        self._nextMeshCreationStep()
+
+    def _nextMeshCreationStep(self):
+        context = self.meshCreation
+        if context is None or self.printer is None:
+            return
+
+        if context['index'] >= len(context['steps']):
+            # Mesh saved: run the normal connection setup again
+            self.meshCreation = None
+            dialog = self.dialogs[self.Dialog.CREATE_MESH]
+            dialog.blockSignals(True)
+            dialog.hide()
+            dialog.blockSignals(False)
+            self.manualWidget.appendNote('Created and saved a new bed mesh on the printer (G29 + M500).')
+            self.updateState(self.State.INITIALIZING)
+            self.dialogs[self.Dialog.INITIALIZING].show()
+            self.printer.init(self._createId('init'))
+            return
+
+        text, send = context['steps'][context['index']]
+        total = len(context['steps'])
+        self.dialogs[self.Dialog.CREATE_MESH].setText(f'Creating bed mesh (step {context["index"] + 1} of {total})\n\n{text}')
+        command = send(self.printer.commandConnection)
+        command.finished.connect(lambda command, context=context: self._meshCreationStepDone(command, context))
+
+    def _meshCreationStepDone(self, command, context):
+        if context is not self.meshCreation:
+            return # Cancelled or disconnected
+        if command.error:
+            self.meshCreation = None
+            self._error(f'Creating the bed mesh failed during {command.NAME}: {command.error}')
+            return
+        context['index'] += 1
+        self._nextMeshCreationStep()
+
+    def _cancelMeshCreation(self):
+        if self.meshCreation is None:
+            return
+        self.meshCreation = None
+        self.disconnectFromPrinter()
+        QtWidgets.QMessageBox.information(
+            self, 'Mesh creation cancelled',
+            'Bed Leveler 5000 disconnected. The printer may still finish the current step (heating or probing).\n\n'
+            'You can create the mesh later with G29 then M500, or connect again to be asked again.')
 
     def _fatalError(self, message):
         self.logger.critical(message)

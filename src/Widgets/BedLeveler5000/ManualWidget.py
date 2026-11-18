@@ -194,7 +194,12 @@ class ManualWidget(QtWidgets.QWidget):
         if self.previousCommand is self.Command.ALL:
             self.log.append('--------------------------------------------------')
 
-        self.log.append(f'Probed {result.name} ({result.x}, {result.y}): {result.z:.3f}')
+        text = f'Probed {result.name} ({result.x}, {result.y}): {result.z:.3f}'
+        reference = getattr(self, 'lastReferenceName', None)
+        results = getattr(self, 'lastResults', None) or {}
+        if reference is not None and reference in results and result.name != reference:
+            text += f'  ({self.goalText(result.z - results[reference])} vs reference {reference})'
+        self.log.append(text)
         self.previousCommand = self.Command.SINGLE
 
     def _reportAllProbe(self, resultList):
@@ -228,22 +233,30 @@ class ManualWidget(QtWidgets.QWidget):
 
         if self.previousCommand is not None:
             self.log.append('--------------------------------------------------')
+        showGoal = self.outputComboBox.currentData() != self.Output.NONE
+        if showGoal:
+            self.log.append(self.goalHeader(referenceName))
 
         for raw, relative in zip(resultList, relativeDistanceList):
             assert(raw.name == relative.name)
-            prefix = f'Probed {raw.name} ({raw.x:5.1f}, {raw.y:5.1f}): {raw.z:6.3f}'
+            if showGoal:
+                prefix = (f'{raw.name} ({raw.x:5.1f}, {raw.y:5.1f}): {self.goalText(relative.z)}'
+                          f'   [probed {raw.z:6.3f}]')
+            else:
+                prefix = f'Probed {raw.name} ({raw.x:5.1f}, {raw.y:5.1f}): {raw.z:6.3f}'
 
             if self.outputComboBox.currentData() == self.Output.NONE:
                 suffix = ''
             elif raw.name in noKnob:
                 shape = 'lower' if relative.z < 0 else 'higher'
-                suffix = f' (No knob: {abs(relative.z):.3f} mm {shape} than {referenceName}, bed shape)'
+                suffix = f'  ->  No knob here ({shape} than {referenceName}, bed shape)'
             elif raw.name == referenceName:
-                suffix = ' (Fixed reference)' if self.fixedMap.get(raw.name) else ' (Reference)'
+                suffix = ('  ->  Fixed reference, the goal' if self.fixedMap.get(raw.name)
+                          else '  ->  Reference, the goal')
             elif self.fixedMap[raw.name]:
                 suffix = ''
             else:
-                suffix = self.adjustText(relative.z)
+                suffix = self.actionText(relative.z)
 
             self.log.append(prefix + suffix)
         self.previousCommand = self.Command.ALL
@@ -264,6 +277,30 @@ class ManualWidget(QtWidgets.QWidget):
 
     # ----- Plain instructions -----
     LEAVE_IT_MM = 0.02   # Differences smaller than this aren't worth turning a knob for
+
+    def atGoal(self, relativeZ):
+        return round(abs(relativeZ), 3) <= self.LEAVE_IT_MM
+
+    def goalText(self, relativeZ):
+        """ Height difference from the reference, which is the goal (0.000). """
+        mark = ' \u2713' if self.atGoal(relativeZ) else '  '
+        if round(relativeZ, 3) == 0:
+            return f' 0.000 mm{mark}'
+        return f'{relativeZ:+.3f} mm{mark}'
+
+    def actionText(self, relativeZ):
+        """ '  ->  what to do' for a knob relativeZ mm from the goal, in the chosen output units. """
+        action = self.adjustText(relativeZ)
+        if action.startswith(' ('):
+            action = action.strip()[1:-1]
+            if action.startswith('Adjust: ') and self.atGoal(relativeZ):
+                action = f'At goal (exact: {action[len("Adjust: "):]})'
+            action = '  ->  ' + action
+        return action
+
+    def goalHeader(self, referenceName):
+        return (f'Goal: every knob at 0.000 (within \u00B1{self.LEAVE_IT_MM:.2f} mm \u2713), '
+                f'measured from reference point {referenceName}.')
 
     @staticmethod
     def interiorPointNames(points):
@@ -332,14 +369,14 @@ class ManualWidget(QtWidgets.QWidget):
         return sorted(knobs, key=lambda p: p.z)[len(knobs) // 2]
 
     def plainInstruction(self, relativeZ):
-        """ 'OK, leave it' or 'turn N min CW/CCW' for a knob that is relativeZ mm above the reference. """
-        if round(abs(relativeZ), 3) <= self.LEAVE_IT_MM:
-            return f'OK, leave it ({relativeZ:+.3f} mm)'
+        """ 'At goal, leave it' or 'turn N min CW/CCW' for a knob that is relativeZ mm above the reference. """
+        if self.atGoal(relativeZ):
+            return 'At goal, leave it'
 
         turns = abs(relativeZ) / self.printerInfo.screwType.pitch
         minutes = round(turns * 60)
         if minutes == 0:
-            return f'OK, leave it ({relativeZ:+.3f} mm)'
+            return 'At goal, leave it'
 
         if self.printerInfo.screwType.clockwise:
             direction = 'CCW' if relativeZ > 0 else 'CW'
@@ -354,7 +391,7 @@ class ManualWidget(QtWidgets.QWidget):
         else:
             amount = f'{minutes} min'
         action = 'lower' if relativeZ > 0 else 'raise'
-        return f'Turn {amount} {direction} ({action} {abs(relativeZ):.3f} mm)'
+        return f'Turn {amount} {direction} to {action} it'
 
     def _reportAllProbePlain(self, resultList):
         interior = self.interiorPointNames(resultList)
@@ -370,17 +407,19 @@ class ManualWidget(QtWidgets.QWidget):
             self.previousCommand = self.Command.ALL
             return
 
+        self.log.append(self.goalHeader(reference.name))
         toTurn = 0
         for p in resultList:
-            prefix = f'Probed {p.name} ({p.x:5.1f}, {p.y:5.1f}): {p.z:6.3f}  ->  '
             relative = p.z - reference.z
+            prefix = (f'{p.name} ({p.x:5.1f}, {p.y:5.1f}): {self.goalText(relative)}'
+                      f'   [probed {p.z:6.3f}]  ->  ')
             if p.name == reference.name:
-                text = 'Reference, leave it'
+                text = 'Reference, the goal. Leave it'
             elif p.name in interior:
                 shape = 'lower' if relative < 0 else 'higher'
-                text = f'No knob here: {abs(relative):.3f} mm {shape} than the reference (bed shape)'
+                text = f'No knob here ({shape} than the reference, bed shape)'
             elif self.fixedMap.get(p.name):
-                text = f'Fixed support ({relative:+.3f} mm)'
+                text = 'Fixed support'
             else:
                 text = self.plainInstruction(relative)
                 if text.startswith('Turn'):
@@ -550,14 +589,16 @@ class ManualWidget(QtWidgets.QWidget):
         self.liveAdjust.emit(point, referenceName, referenceZ)
 
     def liveReadingText(self, name, z, referenceName, referenceZ):
+        """ One line: distance from the goal (the reference = 0.000), what to do, and the raw numbers. """
         relative = z - referenceZ
-        text = f'{name}: {z:6.3f} mm, {relative:+.3f} vs {referenceName}'
+        text = f'Point {name}: {self.goalText(relative)}  (goal 0.000)'
+        raw = f'   [probed {z:.3f}, reference {referenceName} {referenceZ:.3f}]'
         if name in self._noKnobNames():
             shape = 'lower' if relative < 0 else 'higher'
-            return f'{text}  ->  No knob here: {abs(relative):.3f} mm {shape} than {referenceName} (bed shape)'
+            return f'{text}  ->  No knob here ({shape} than {referenceName}, bed shape){raw}'
         if self.fixedMap.get(name, False):
-            return f'{text}  ->  Fixed support, no knob'
-        return text + self.adjustText(relative)
+            return f'{text}  ->  Fixed support, no knob{raw}'
+        return text + self.actionText(relative) + raw
 
     def logLiveReading(self, text):
         if self.previousCommand is not None:

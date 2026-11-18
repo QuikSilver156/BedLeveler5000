@@ -152,13 +152,14 @@ allTestPoints = [
                              '4': False,
                              '5': False,
                              '6': False},
-                 expected = 'Probed H (215.0, 215.0): -0.022 (Fixed reference)' \
-                            'Probed 1 ( 61.8,  17.1): -0.010 (Delta:  0.012)'   \
-                            'Probed 2 ( 61.8, 194.6):  0.033 (Delta:  0.055)'   \
-                            'Probed 3 ( 61.8, 372.1): -0.041 (Delta: -0.019)'   \
-                            'Probed 4 (416.8, 372.1): -0.062 (Delta: -0.040)'   \
-                            'Probed 5 (416.8, 194.6):  0.011 (Delta:  0.034)'   \
-                            'Probed 6 (416.8,  17.1): -0.016 (Delta:  0.006)'),
+                 expected = 'Goal: every knob at 0.000 (within ±0.02 mm ✓), measured from reference point H.' \
+                            'H (215.0, 215.0):  0.000 mm ✓   [probed -0.022]  ->  Fixed reference, the goal' \
+                            '1 ( 61.8,  17.1): +0.012 mm ✓   [probed -0.010]  ->  Delta:  0.012' \
+                            '2 ( 61.8, 194.6): +0.055 mm     [probed  0.033]  ->  Delta:  0.055' \
+                            '3 ( 61.8, 372.1): -0.019 mm ✓   [probed -0.041]  ->  Delta: -0.019' \
+                            '4 (416.8, 372.1): -0.040 mm     [probed -0.062]  ->  Delta: -0.040' \
+                            '5 (416.8, 194.6): +0.034 mm     [probed  0.011]  ->  Delta:  0.034' \
+                            '6 (416.8,  17.1): +0.006 mm ✓   [probed -0.016]  ->  Delta:  0.006'),
     AllTestPoint(resultList = RESULT_LIST_1,
                  reference = 'H',
                  direction = 'Any',
@@ -171,13 +172,14 @@ allTestPoints = [
                              '4': False,
                              '5': False,
                              '6': False},
-                 expected = 'Probed H (215.0, 215.0): -0.022 (Fixed reference)'   \
-                            'Probed 1 ( 61.8,  17.1): -0.010 (Adjust: 1 min CCW)' \
-                            'Probed 2 ( 61.8, 194.6):  0.033 (Adjust: 5 min CCW)' \
-                            'Probed 3 ( 61.8, 372.1): -0.041 (Adjust: 2 min CW)'  \
-                            'Probed 4 (416.8, 372.1): -0.062 (Adjust: 3 min CW)'  \
-                            'Probed 5 (416.8, 194.6):  0.011 (Adjust: 3 min CCW)' \
-                            'Probed 6 (416.8,  17.1): -0.016 (Adjust: 1 min CCW)'),
+                 expected = 'Goal: every knob at 0.000 (within ±0.02 mm ✓), measured from reference point H.' \
+                            'H (215.0, 215.0):  0.000 mm ✓   [probed -0.022]  ->  Fixed reference, the goal' \
+                            '1 ( 61.8,  17.1): +0.012 mm ✓   [probed -0.010]  ->  At goal (exact: 1 min CCW)' \
+                            '2 ( 61.8, 194.6): +0.055 mm     [probed  0.033]  ->  Adjust: 5 min CCW' \
+                            '3 ( 61.8, 372.1): -0.019 mm ✓   [probed -0.041]  ->  At goal (exact: 2 min CW)' \
+                            '4 (416.8, 372.1): -0.040 mm     [probed -0.062]  ->  Adjust: 3 min CW' \
+                            '5 (416.8, 194.6): +0.034 mm     [probed  0.011]  ->  Adjust: 3 min CCW' \
+                            '6 (416.8,  17.1): +0.006 mm ✓   [probed -0.016]  ->  At goal (exact: 1 min CCW)'),
     AllTestPoint(resultList = RESULT_LIST_1,
                  reference = 'H',
                  direction = 'Any',
@@ -190,13 +192,14 @@ allTestPoints = [
                              '4': False,
                              '5': False,
                              '6': False},
-                 expected = 'Probed H (215.0, 215.0): -0.022 (Fixed reference)'         \
-                            'Probed 1 ( 61.8,  17.1): -0.010 (Adjust: 0.018 turns CCW)' \
-                            'Probed 2 ( 61.8, 194.6):  0.033 (Adjust: 0.079 turns CCW)' \
-                            'Probed 3 ( 61.8, 372.1): -0.041 (Adjust: 0.027 turns CW)'  \
-                            'Probed 4 (416.8, 372.1): -0.062 (Adjust: 0.057 turns CW)'  \
-                            'Probed 5 (416.8, 194.6):  0.011 (Adjust: 0.048 turns CCW)' \
-                            'Probed 6 (416.8,  17.1): -0.016 (Adjust: 0.009 turns CCW)'),
+                 expected = 'Goal: every knob at 0.000 (within ±0.02 mm ✓), measured from reference point H.' \
+                            'H (215.0, 215.0):  0.000 mm ✓   [probed -0.022]  ->  Fixed reference, the goal' \
+                            '1 ( 61.8,  17.1): +0.012 mm ✓   [probed -0.010]  ->  At goal (exact: 0.018 turns CCW)' \
+                            '2 ( 61.8, 194.6): +0.055 mm     [probed  0.033]  ->  Adjust: 0.079 turns CCW' \
+                            '3 ( 61.8, 372.1): -0.019 mm ✓   [probed -0.041]  ->  At goal (exact: 0.027 turns CW)' \
+                            '4 (416.8, 372.1): -0.040 mm     [probed -0.062]  ->  Adjust: 0.057 turns CW' \
+                            '5 (416.8, 194.6): +0.034 mm     [probed  0.011]  ->  Adjust: 0.048 turns CCW' \
+                            '6 (416.8,  17.1): +0.006 mm ✓   [probed -0.016]  ->  At goal (exact: 0.009 turns CCW)'),
     AllTestPoint(resultList = RESULT_LIST_1,
                  reference = 'H',
                  direction = 'Any',
@@ -209,13 +212,14 @@ allTestPoints = [
                              '4': False,
                              '5': False,
                              '6': False},
-                 expected = 'Probed H (215.0, 215.0): -0.022 (Fixed reference)'     \
-                            'Probed 1 ( 61.8,  17.1): -0.010 (Adjust:   6.43° CCW)' \
-                            'Probed 2 ( 61.8, 194.6):  0.033 (Adjust:  28.29° CCW)' \
-                            'Probed 3 ( 61.8, 372.1): -0.041 (Adjust:   9.64° CW)'  \
-                            'Probed 4 (416.8, 372.1): -0.062 (Adjust:  20.57° CW)'  \
-                            'Probed 5 (416.8, 194.6):  0.011 (Adjust:  17.36° CCW)' \
-                            'Probed 6 (416.8,  17.1): -0.016 (Adjust:   3.21° CCW)'),
+                 expected = 'Goal: every knob at 0.000 (within ±0.02 mm ✓), measured from reference point H.' \
+                            'H (215.0, 215.0):  0.000 mm ✓   [probed -0.022]  ->  Fixed reference, the goal' \
+                            '1 ( 61.8,  17.1): +0.012 mm ✓   [probed -0.010]  ->  At goal (exact:   6.43° CCW)' \
+                            '2 ( 61.8, 194.6): +0.055 mm     [probed  0.033]  ->  Adjust:  28.29° CCW' \
+                            '3 ( 61.8, 372.1): -0.019 mm ✓   [probed -0.041]  ->  At goal (exact:   9.64° CW)' \
+                            '4 (416.8, 372.1): -0.040 mm     [probed -0.062]  ->  Adjust:  20.57° CW' \
+                            '5 (416.8, 194.6): +0.034 mm     [probed  0.011]  ->  Adjust:  17.36° CCW' \
+                            '6 (416.8,  17.1): +0.006 mm ✓   [probed -0.016]  ->  At goal (exact:   3.21° CCW)'),
     AllTestPoint(resultList = RESULT_LIST_1,
                  reference = 'H',
                  direction = 'Any',
@@ -228,13 +232,14 @@ allTestPoints = [
                              '4': False,
                              '5': False,
                              '6': False},
-                 expected = 'Probed H (215.0, 215.0): -0.022 (Fixed reference)'         \
-                            'Probed 1 ( 61.8,  17.1): -0.010 (Adjust:  0.1122 rad CCW)' \
-                            'Probed 2 ( 61.8, 194.6):  0.033 (Adjust:  0.4937 rad CCW)' \
-                            'Probed 3 ( 61.8, 372.1): -0.041 (Adjust:  0.1683 rad CW)'  \
-                            'Probed 4 (416.8, 372.1): -0.062 (Adjust:  0.3590 rad CW)'  \
-                            'Probed 5 (416.8, 194.6):  0.011 (Adjust:  0.3029 rad CCW)' \
-                            'Probed 6 (416.8,  17.1): -0.016 (Adjust:  0.0561 rad CCW)')
+                 expected = 'Goal: every knob at 0.000 (within ±0.02 mm ✓), measured from reference point H.' \
+                            'H (215.0, 215.0):  0.000 mm ✓   [probed -0.022]  ->  Fixed reference, the goal' \
+                            '1 ( 61.8,  17.1): +0.012 mm ✓   [probed -0.010]  ->  At goal (exact:  0.1122 rad CCW)' \
+                            '2 ( 61.8, 194.6): +0.055 mm     [probed  0.033]  ->  Adjust:  0.4937 rad CCW' \
+                            '3 ( 61.8, 372.1): -0.019 mm ✓   [probed -0.041]  ->  At goal (exact:  0.1683 rad CW)' \
+                            '4 (416.8, 372.1): -0.040 mm     [probed -0.062]  ->  Adjust:  0.3590 rad CW' \
+                            '5 (416.8, 194.6): +0.034 mm     [probed  0.011]  ->  Adjust:  0.3029 rad CCW' \
+                            '6 (416.8,  17.1): +0.006 mm ✓   [probed -0.016]  ->  At goal (exact:  0.0561 rad CCW)')
 ]
 
 @pytest.mark.parametrize('testPoint', allTestPoints)
