@@ -749,11 +749,16 @@ class MainWindow(QtWidgets.QMainWindow):
             referenceName, referenceZ = self._liveReferenceFor(nextPoint.name, context)
             self.startLiveAdjust(nextPoint, referenceName, referenceZ, alreadyShown=True)
             return
+        # In the dialog: distance from the goal on its own line, then what to do, then the raw numbers
+        dialogText = text.replace('  ->  ', '\n').replace('   [', '\n[')
         self.dialogs[self.Dialog.LIVE].setText(f'Live adjust: point {point.name} (reading {context["count"]})\n\n'
                                                f'{context["referenceNote"]}{warning}'
-                                               f'{text}\n\n'
-                                               + (f'Turn the knob for point {point.name} now. The next reading starts '
-                                                  f'automatically. Press Done when it reads close to +0.000.'
+                                               f'{dialogText}\n\n'
+                                               + ((f'Point {point.name} is at the goal. Press Next point or Done (readings keep updating).'
+                                                   if self.manualWidget.atGoal(relative) else
+                                                   f'Turn the knob for point {point.name} toward 0.000. The next reading '
+                                                   f'starts automatically. A \u2713 means it is close enough '
+                                                   f'(within \u00B1{self.manualWidget.LEAVE_IT_MM:.2f} mm).')
                                                   if self.manualWidget.hasKnob(point.name) else
                                                   f'Point {point.name} has no knob, so this is just for checking. '
                                                   f'Readings keep updating; press Next point or Done.'))
