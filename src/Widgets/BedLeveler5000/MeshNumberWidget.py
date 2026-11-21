@@ -11,7 +11,9 @@ class MeshNumberWidget(QtWidgets.QMainWindow):
         self._rowCount = 0
         self._columnCount = 0
 
-        self.lineEditWidth = QtGui.QFontMetrics(qApp.font()).horizontalAdvance(' X.XXX ') # TODO: Use theme padding instead of spaces
+        # Room for a minus sign and two digits before the point, plus the line edit's frame and margins.
+        # (Too narrow and Qt scrolls the text, hiding the minus sign of negative values.)
+        self.lineEditWidth = QtGui.QFontMetrics(qApp.font()).horizontalAdvance('  -00.000  ') + 12
 
     def resizeMesh(self, rowCount, columnCount):
         if self.centralWidget() is not None:
@@ -31,6 +33,7 @@ class MeshNumberWidget(QtWidgets.QMainWindow):
                 lineEdit = QtWidgets.QLineEdit()
                 lineEdit.setReadOnly(True)
                 lineEdit.setFixedWidth(self.lineEditWidth)
+                lineEdit.setAlignment(QtCore.Qt.AlignCenter)
                 lineEdit.setText('')
                 layout.addWidget(lineEdit, row, column)
 
@@ -52,7 +55,9 @@ class MeshNumberWidget(QtWidgets.QMainWindow):
     def setPoint(self, row, column, z):
         assert(row < self.rowCount() and column < self.columnCount())
 
-        self.centralWidget().layout().itemAtPosition(self.rowCount() - row - 1, column).widget().setText(f'{z:.3f}')
+        lineEdit = self.centralWidget().layout().itemAtPosition(self.rowCount() - row - 1, column).widget()
+        lineEdit.setText(f'{z:.3f}')
+        lineEdit.setCursorPosition(0)  # Always show the start of the number, minus sign included
 
 if __name__ == '__main__':
     # Main only imports
